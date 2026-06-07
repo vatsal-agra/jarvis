@@ -1,0 +1,11 @@
+# Copy this file to `jarvis_keys.txt` and put your real Google Gemini API keys below,
+# one per line. Blank lines and lines starting with # are ignored.
+#
+# Get free keys at https://aistudio.google.com/apikey  (one per Google account).
+# The app rotates through them when one hits its daily free-tier limit.
+#
+# Alternatively, set the JARVIS_GEMINI_KEYS env var (comma-separated) instead of
+# using this file — the env var takes priority.
+
+YOUR_GEMINI_API_KEY_1_HERE
+YOUR_GEMINI_API_KEY_2_HERE

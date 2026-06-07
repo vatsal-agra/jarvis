@@ -1,0 +1,32 @@
+# ── Secrets — NEVER commit ────────────────────────────────────────────────
+jarvis_keys.txt
+.env
+.env.*
+*.key
+secrets*.py
+
+# ── Local Chrome profile / login session (cookies, tokens) ────────────────
+.jarvis_chrome_profile/
+
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# ── Audio / temp artifacts ────────────────────────────────────────────────
+*.mp3
+*.wav
+*.tmp
+tmp/
+temp/
+
+# ── OS / editor cruft ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
