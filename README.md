@@ -65,6 +65,9 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
   browsing, **file writing** (save notes/drafts/`.docx`), live **currency
   conversion**, and **media controls** (play/pause/next/volume). Pending
   reminders show as **live countdowns** on the HUD.
+- **Knowledge tools** — **read/summarise any web article** by URL, live
+  **crypto prices**, **dictionary** definitions, and **unit conversion**
+  (length/mass/volume/speed/data/temperature) — all free.
 - **Interrupt anytime** — press **ESC** to stop the current task mid-action.
 - **Live HUD** — a cinematic web dashboard (zero extra dependencies, served from
   Python over Server-Sent Events) that visualises the assistant in real time:

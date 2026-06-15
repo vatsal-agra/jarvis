@@ -1371,6 +1371,64 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_url",
+            "description": "Fetch a specific web page/article by URL and summarise it or answer a question about it. Use when the user gives a link or says 'summarise this article'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "question": {"type": "string", "description": "Optional specific question; omit to summarise."}
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_crypto_price",
+            "description": "Get the live price of a cryptocurrency (free).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "coin": {"type": "string", "description": "e.g. 'bitcoin', 'eth', 'solana'."},
+                    "currency": {"type": "string", "description": "fiat code, default usd."}
+                },
+                "required": ["coin"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "define_word",
+            "description": "Get the dictionary definition of a word (free).",
+            "parameters": {
+                "type": "object",
+                "properties": {"word": {"type": "string"}},
+                "required": ["word"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_units",
+            "description": "Convert between units of length, mass, volume, speed, data, or temperature.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "value": {"type": "number"},
+                    "from_unit": {"type": "string", "description": "e.g. 'km', 'lb', 'celsius'."},
+                    "to_unit": {"type": "string", "description": "e.g. 'miles', 'kg', 'fahrenheit'."}
+                },
+                "required": ["value", "from_unit", "to_unit"],
+            },
+        },
+    },
 ]
 
 
@@ -1881,6 +1939,26 @@ def execute_tool(name: str, args: dict) -> str:
     elif name == "media_control":
         return _media_control(args.get("action", ""))
 
+    # ── read_url ─────────────────────────────────────────────────────────────--
+    elif name == "read_url":
+        return _read_url(args.get("url", ""), args.get("question", ""))
+
+    # ── get_crypto_price ─────────────────────────────────────────────────────---
+    elif name == "get_crypto_price":
+        return _get_crypto_price(args.get("coin", ""), args.get("currency", "usd"))
+
+    # ── define_word ──────────────────────────────────────────────────────────---
+    elif name == "define_word":
+        return _define_word(args.get("word", ""))
+
+    # ── convert_units ────────────────────────────────────────────────────────---
+    elif name == "convert_units":
+        try:
+            val = float(args.get("value", 0))
+        except Exception:
+            val = 0.0
+        return _convert_units(val, args.get("from_unit", ""), args.get("to_unit", ""))
+
     return f"Unknown tool: {name}"
 
 
@@ -1921,6 +1999,10 @@ Convert currency                        → convert_currency
 Play/pause/next music or volume         → media_control
 Reveal off-screen page content          → browser_scroll
 Work across multiple tabs               → browser_tab
+Summarise an article / read a link      → read_url
+Crypto price                            → get_crypto_price
+Define a word                           → define_word
+Convert units (length/mass/temp/…)      → convert_units
 
 ━━ SHOW YOUR PLAN ━━
 For any task with 3 or more steps, FIRST call set_plan with the ordered steps — it
@@ -2737,6 +2819,129 @@ def _convert_currency(amount: float, frm: str, to: str) -> str:
         return f"{amount} {frm} = {round(amount * rate, 2)} {to} (rate {round(rate, 4)})."
     except Exception as e:
         return f"Currency error: {e}"
+
+
+def _read_url(url: str, question: str = "") -> str:
+    """Fetch a web page, extract readable text, and summarise/answer with Gemini."""
+    if not url.startswith("http"):
+        url = "https://" + url
+    try:
+        html = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"}).text
+    except Exception as e:
+        return f"Couldn't fetch that page: {e}"
+    html = re.sub(r"(?is)<(script|style|noscript|svg|header|footer|nav)[^>]*>.*?</\1>", " ", html)
+    text = re.sub(r"(?s)<[^>]+>", " ", html)
+    text = re.sub(r"&[a-z]+;", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()[:12000]
+    if not text:
+        return "That page had no readable text."
+    task = question.strip() or "Summarise this page in 3-4 spoken-friendly sentences."
+    messages = [
+        {"role": "system", "content": "Use ONLY the page text below. Be concise and spoken-friendly.\n\nPAGE:\n" + text},
+        {"role": "user", "content": task},
+    ]
+    try:
+        return (_gemini_request(messages, None, 0.3).get("content") or "").strip()
+    except Exception as e:
+        return f"Couldn't analyse the page: {e}"
+
+
+_COIN_IDS = {"btc": "bitcoin", "bitcoin": "bitcoin", "eth": "ethereum", "ethereum": "ethereum",
+             "sol": "solana", "solana": "solana", "doge": "dogecoin", "dogecoin": "dogecoin",
+             "ada": "cardano", "xrp": "ripple", "bnb": "binancecoin", "matic": "matic-network",
+             "ltc": "litecoin", "dot": "polkadot", "shib": "shiba-inu"}
+
+
+def _get_crypto_price(coin: str, currency: str = "usd") -> str:
+    cid = _COIN_IDS.get(coin.lower().strip(), coin.lower().strip().replace(" ", "-"))
+    cur = (currency or "usd").lower().strip()
+    try:
+        d = requests.get("https://api.coingecko.com/api/v3/simple/price",
+                         params={"ids": cid, "vs_currencies": cur, "include_24hr_change": "true"},
+                         timeout=10).json()
+        if cid not in d:
+            return f"Couldn't find a crypto called '{coin}'."
+        price = d[cid][cur]
+        chg = d[cid].get(f"{cur}_24h_change")
+        extra = f", {chg:+.1f}% in 24h" if isinstance(chg, (int, float)) else ""
+        return f"{cid.capitalize()} is {price:,} {cur.upper()}{extra}."
+    except Exception as e:
+        return f"Crypto price error: {e}"
+
+
+def _define_word(word: str) -> str:
+    word = word.strip()
+    try:
+        d = requests.get(f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(word)}",
+                         timeout=10).json()
+        if not isinstance(d, list):
+            return f"I couldn't find a definition for '{word}'."
+        out = []
+        for meaning in d[0].get("meanings", [])[:3]:
+            pos = meaning.get("partOfSpeech", "")
+            defs = meaning.get("definitions", [])
+            if defs:
+                out.append(f"({pos}) {defs[0].get('definition','')}")
+        return f"{word}: " + " ".join(out) if out else f"No definition found for '{word}'."
+    except Exception as e:
+        return f"Dictionary error: {e}"
+
+
+_UNIT_BASE = {  # convert everything to a base unit per dimension
+    # length → metres
+    "mm": 0.001, "cm": 0.01, "m": 1, "km": 1000, "inch": 0.0254, "in": 0.0254,
+    "ft": 0.3048, "foot": 0.3048, "feet": 0.3048, "yard": 0.9144, "yd": 0.9144,
+    "mile": 1609.344, "mi": 1609.344,
+    # mass → grams
+    "mg": 0.001, "g": 1, "gram": 1, "kg": 1000, "lb": 453.592, "lbs": 453.592,
+    "pound": 453.592, "oz": 28.3495, "ounce": 28.3495, "ton": 1_000_000,
+    # volume → litres
+    "ml": 0.001, "l": 1, "litre": 1, "liter": 1, "gal": 3.78541, "gallon": 3.78541,
+    "cup": 0.236588, "pint": 0.473176,
+    # speed → m/s
+    "mps": 1, "kmh": 0.277778, "kph": 0.277778, "mph": 0.44704,
+    # data → bytes
+    "b": 1, "kb": 1024, "mb": 1024**2, "gb": 1024**3, "tb": 1024**4,
+}
+_UNIT_DIM = {}
+for _grp in [["mm","cm","m","km","inch","in","ft","foot","feet","yard","yd","mile","mi"],
+             ["mg","g","gram","kg","lb","lbs","pound","oz","ounce","ton"],
+             ["ml","l","litre","liter","gal","gallon","cup","pint"],
+             ["mps","kmh","kph","mph"], ["b","kb","mb","gb","tb"]]:
+    for _u in _grp:
+        _UNIT_DIM[_u] = _grp[0]
+
+
+_UNIT_ALIAS = {"miles": "mi", "mile": "mi", "kilometers": "km", "kilometres": "km",
+               "kilometer": "km", "kilometre": "km", "meters": "m", "metres": "m",
+               "metre": "m", "meter": "m", "centimeters": "cm", "centimetres": "cm",
+               "millimeters": "mm", "inches": "in", "feet": "ft", "yards": "yd",
+               "pounds": "lb", "kilograms": "kg", "kilogram": "kg", "grams": "g",
+               "ounces": "oz", "litres": "l", "liters": "l", "gallons": "gal",
+               "cups": "cup", "pints": "pint", "celsius": "c", "fahrenheit": "f",
+               "kelvin": "k", "centigrade": "c"}
+
+
+def _unit_norm(u: str) -> str:
+    u = u.lower().strip()
+    if u in _UNIT_ALIAS:
+        return _UNIT_ALIAS[u]
+    if u not in _UNIT_BASE and u.endswith("s") and u[:-1] in _UNIT_BASE:
+        return u[:-1]
+    return u
+
+
+def _convert_units(value: float, frm: str, to: str) -> str:
+    f, t = _unit_norm(frm), _unit_norm(to)
+    temp = {"c", "celsius", "f", "fahrenheit", "k", "kelvin"}
+    if f in temp and t in temp:
+        c = value if f in ("c", "celsius") else (value - 32) * 5 / 9 if f in ("f", "fahrenheit") else value - 273.15
+        out = c if t in ("c", "celsius") else c * 9 / 5 + 32 if t in ("f", "fahrenheit") else c + 273.15
+        return f"{value}°{f[0].upper()} = {round(out, 2)}°{t[0].upper()}."
+    if f in _UNIT_BASE and t in _UNIT_BASE and _UNIT_DIM.get(f) == _UNIT_DIM.get(t):
+        out = value * _UNIT_BASE[f] / _UNIT_BASE[t]
+        return f"{value} {frm} = {round(out, 4)} {to}."
+    return f"I can't convert {frm} to {to} (incompatible or unknown units)."
 
 
 def _media_control(action: str) -> str:
