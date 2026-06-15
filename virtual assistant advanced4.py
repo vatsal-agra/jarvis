@@ -120,6 +120,7 @@ _HUD_CLIENTS       = []                 # one queue.Queue per connected browser
 _HUD_LOCK          = threading.Lock()
 _HUD_LAST          = {}                 # last value of replayable events (for late joiners)
 _GEMINI_USAGE      = {}                 # (key_index, model) -> requests made this session
+_TEXT_CMDS         = _queue.Queue()     # commands typed into the HUD → main loop
 
 
 def _hud_emit(kind: str, **data) -> None:
@@ -222,6 +223,23 @@ class _HudHandler(http.server.BaseHTTPRequestHandler):
                         pass
             return
 
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path == "/command":
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n) or b"{}")
+                text = (body.get("text") or "").strip()
+                if text:
+                    _TEXT_CMDS.put(text)
+            except Exception:
+                pass
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            return
         self.send_response(404)
         self.end_headers()
 
@@ -1198,6 +1216,80 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate",
+            "description": "Evaluate a math expression (arithmetic, powers, sqrt, sin/cos/log, etc.). Use for any calculation instead of doing mental math.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string", "description": "e.g. '(45*1.18) + sqrt(144)' or '2**10'."}
+                },
+                "required": ["expression"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_news",
+            "description": "Get current news headlines (free). Optionally about a topic. Use for 'what's the news', 'latest on X'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Optional topic, e.g. 'AI' or 'cricket'. Omit for top headlines."}
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "daily_briefing",
+            "description": "Give a spoken briefing: greeting, date/time, weather, top headlines and pending reminders. Use for 'brief me' / 'what's my morning look like'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City for the weather part (use what you know about the user if available)."},
+                    "topic": {"type": "string", "description": "Optional news topic focus."}
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_plan",
+            "description": (
+                "At the START of a multi-step task, declare your plan as a list of short steps. "
+                "It shows on the user's HUD as a live checklist. Then call complete_step after "
+                "finishing each step. Use for tasks with 3+ steps."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {"type": "array", "items": {"type": "string"},
+                              "description": "Ordered short step descriptions (max 8)."}
+                },
+                "required": ["steps"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "complete_step",
+            "description": "Mark the plan step at the given index (0-based) as complete. Call right after finishing that step.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "0-based index of the step just completed."}
+                },
+                "required": ["index"],
+            },
+        },
+    },
 ]
 
 
@@ -1350,8 +1442,16 @@ def execute_tool(name: str, args: dict) -> str:
                     return f"Clicked '{text}'. Page now:\n\n{snap}"
                 except Exception:
                     continue
+            # Self-heal: text matching failed → fall back to vision (Set-of-Marks).
+            try:
+                _hud_emit("toast", text="👁 click self-healing via vision…", level="info")
+                vres = _vision_click(page, text)
+                if vres.startswith("Saw and clicked"):
+                    return vres
+            except Exception:
+                pass
             return (
-                f"Could not find '{text}' to click. Call browser_snapshot and "
+                f"Could not find '{text}' to click, even with vision. Call browser_snapshot and "
                 f"click using the element [number] instead."
             )
         except Exception as e:
@@ -1612,6 +1712,25 @@ def execute_tool(name: str, args: dict) -> str:
     elif name == "ask_file":
         return _ask_file(args.get("path", ""), args.get("question", "Summarise this file."))
 
+    # ── calculate ───────────────────────────────────────────────────────────────
+    elif name == "calculate":
+        return _calculate(args.get("expression", ""))
+
+    # ── get_news ──────────────────────────────────────────────────────────────--
+    elif name == "get_news":
+        heads = _get_news(args.get("topic", ""), n=6)
+        return ("Headlines:\n" + "\n".join(f"• {h}" for h in heads)) if heads else "Couldn't fetch news right now."
+
+    # ── daily_briefing ──────────────────────────────────────────────────────────
+    elif name == "daily_briefing":
+        return _compose_briefing(args.get("location", ""), args.get("topic", ""))
+
+    # ── set_plan / complete_step ────────────────────────────────────────────────
+    elif name == "set_plan":
+        return _set_plan(args.get("steps", []))
+    elif name == "complete_step":
+        return _complete_step(args.get("index", 0))
+
     return f"Unknown tool: {name}"
 
 
@@ -1641,9 +1760,17 @@ Click an unlabelled/visual element      → click_by_vision
 Save a lasting fact about the user      → remember
 Look up older context about the user    → recall
 Weather for a place                     → get_weather
+News headlines                          → get_news
+A spoken briefing of the day            → daily_briefing
+Any math / calculation                  → calculate
 Set a reminder / timer                  → set_reminder
 Use text the user has copied            → read_clipboard
 Answer questions about a local file     → ask_file
+
+━━ SHOW YOUR PLAN ━━
+For any task with 3 or more steps, FIRST call set_plan with the ordered steps — it
+appears on the user's HUD as a live checklist. Call complete_step(index) right after
+each step finishes so they can watch progress. Keep steps short.
 
 ━━ YOU HAVE EYES (vision) ━━
 You can SEE. After an important web action whose success isn't obvious from the element
@@ -2278,6 +2405,140 @@ def _ask_file(path: str, question: str) -> str:
         return f"Couldn't analyse the file: {e}"
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  CALCULATOR  ─  safe arithmetic / math (local, instant, no quota)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+import ast as _ast
+import operator as _op
+
+_CALC_BIN = {_ast.Add: _op.add, _ast.Sub: _op.sub, _ast.Mult: _op.mul, _ast.Div: _op.truediv,
+             _ast.Pow: _op.pow, _ast.Mod: _op.mod, _ast.FloorDiv: _op.floordiv}
+_CALC_UN = {_ast.USub: _op.neg, _ast.UAdd: _op.pos}
+_CALC_NAMES = {"pi": math.pi, "e": math.e, "tau": math.tau}
+_CALC_FUNCS = {"sqrt": math.sqrt, "sin": math.sin, "cos": math.cos, "tan": math.tan,
+               "log": math.log, "log10": math.log10, "exp": math.exp, "abs": abs,
+               "round": round, "floor": math.floor, "ceil": math.ceil, "factorial": math.factorial,
+               "radians": math.radians, "degrees": math.degrees, "min": min, "max": max}
+
+
+def _calc_eval(node):
+    if isinstance(node, _ast.Constant):
+        if isinstance(node.value, (int, float)):
+            return node.value
+        raise ValueError("only numbers allowed")
+    if isinstance(node, _ast.BinOp) and type(node.op) in _CALC_BIN:
+        return _CALC_BIN[type(node.op)](_calc_eval(node.left), _calc_eval(node.right))
+    if isinstance(node, _ast.UnaryOp) and type(node.op) in _CALC_UN:
+        return _CALC_UN[type(node.op)](_calc_eval(node.operand))
+    if isinstance(node, _ast.Name) and node.id in _CALC_NAMES:
+        return _CALC_NAMES[node.id]
+    if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name) and node.func.id in _CALC_FUNCS:
+        return _CALC_FUNCS[node.func.id](*[_calc_eval(a) for a in node.args])
+    raise ValueError("unsupported expression")
+
+
+def _calculate(expr: str) -> str:
+    try:
+        val = _calc_eval(_ast.parse(expr.strip(), mode="eval").body)
+        if isinstance(val, float) and val.is_integer():
+            val = int(val)
+        return f"{expr.strip()} = {val}"
+    except Exception:
+        return f"I couldn't compute '{expr}'. Try a plain arithmetic expression."
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  NEWS  ─  free headlines via Google News RSS (no key)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _get_news(topic: str = "", n: int = 6) -> list:
+    import xml.etree.ElementTree as ET
+    if topic.strip():
+        url = "https://news.google.com/rss/search?q=" + urllib.parse.quote(topic) + "&hl=en-US&gl=US&ceid=US:en"
+    else:
+        url = "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"
+    try:
+        xml = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"}).text
+        root = ET.fromstring(xml)
+        items = root.findall(".//item")
+        return [it.findtext("title", "").strip() for it in items[:n] if it.findtext("title")]
+    except Exception:
+        return []
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  DAILY BRIEFING  ─  greeting + weather + headlines + pending reminders
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _compose_briefing(location: str = "", topic: str = "") -> str:
+    hour = datetime.datetime.now().hour
+    greet = "Good morning" if hour < 12 else "Good afternoon" if hour < 18 else "Good evening"
+    parts = [f"{greet}. It's {datetime.datetime.now().strftime('%A, %B %d, %I:%M %p')}."]
+    if location:
+        w = _get_weather(location)
+        if w and not w.lower().startswith(("weather error", "couldn't")):
+            parts.append("Weather: " + w)
+    heads = _get_news(topic, n=4)
+    if heads:
+        parts.append("Top headlines: " + "; ".join(heads) + ".")
+    with _REM_LOCK:
+        pending = len(_REMINDERS)
+    if pending:
+        parts.append(f"You have {pending} reminder(s) pending.")
+    return " ".join(parts)
+
+
+# Proactive routines: optional jarvis_routines.json like
+#   [{"time": "08:00", "location": "Vellore", "topic": "AI"}]
+# fires a spoken briefing once when the local clock reaches that HH:MM.
+_ROUTINES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_routines.json")
+
+
+def _routine_loop() -> None:
+    fired_today = set()
+    last_day = None
+    while True:
+        try:
+            now = datetime.datetime.now()
+            if now.day != last_day:
+                fired_today.clear(); last_day = now.day      # reset each day
+            try:
+                with open(_ROUTINES_PATH, encoding="utf-8") as f:
+                    routines = json.load(f)
+            except Exception:
+                routines = []
+            hhmm = now.strftime("%H:%M")
+            for i, r in enumerate(routines):
+                if r.get("time") == hhmm and i not in fired_today:
+                    fired_today.add(i)
+                    _hud_emit("toast", text="🌅 daily briefing", level="info")
+                    speak(_compose_briefing(r.get("location", ""), r.get("topic", "")))
+        except Exception:
+            pass
+        time.sleep(20)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  PLAN  ─  the model declares a step plan; the HUD shows live progress
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_PLAN = {"steps": [], "done": 0}
+
+
+def _set_plan(steps) -> str:
+    steps = [str(s).strip() for s in (steps or []) if str(s).strip()][:8]
+    _PLAN["steps"], _PLAN["done"] = steps, 0
+    _hud_emit("plan", steps=steps, done=0)
+    return "Plan set." if steps else "Empty plan."
+
+
+def _complete_step(index) -> str:
+    try:
+        i = int(index)
+    except Exception:
+        i = _PLAN["done"]
+    _PLAN["done"] = max(_PLAN["done"], i + 1)
+    _hud_emit("plan", steps=_PLAN["steps"], done=_PLAN["done"])
+    return "Step marked done."
+
+
 def _to_ollama_messages(messages):
     """Convert OpenAI-format messages to what the Ollama client expects. The key
     difference: OpenAI tool_calls store `arguments` as a JSON STRING, but Ollama's
@@ -2498,6 +2759,7 @@ if __name__ == "__main__":
     _rem_load()   # restore any pending reminders from a previous session
     threading.Thread(target=_reminder_loop, daemon=True).start()   # fires reminders when due
     threading.Thread(target=_vitals_loop, daemon=True).start()     # streams live system telemetry
+    threading.Thread(target=_routine_loop, daemon=True).start()    # proactive daily briefings
 
     print("=" * 62)
     print("  JARVIS  —  AI Assistant")
@@ -2549,7 +2811,18 @@ if __name__ == "__main__":
 
     awaiting_followup = False   # conversational mode: brief window after a reply
     while True:
-        query = takeCommand()
+        # Typed commands from the HUD jump the queue and skip the wake word.
+        typed = None
+        try:
+            typed = _TEXT_CMDS.get_nowait()
+        except _queue.Empty:
+            pass
+
+        if typed is not None:
+            query, is_typed = typed, True
+        else:
+            query, is_typed = takeCommand(), False
+
         if not query or query == "none":
             awaiting_followup = False        # silence → go back to requiring the wake word
             continue
@@ -2559,10 +2832,11 @@ if __name__ == "__main__":
         # ── Activation gate ───────────────────────────────────────────────────
         # Normally needs the wake word. But right after Jarvis replies we open a
         # short follow-up window where you can just keep talking, no "Jarvis".
-        followup = awaiting_followup and ("jarvis" not in q)
+        # Typed commands are always activated.
+        followup = (awaiting_followup or is_typed) and ("jarvis" not in q)
         awaiting_followup = False             # this turn consumes the window
 
-        if "jarvis" not in q and not followup:
+        if "jarvis" not in q and not followup and not is_typed:
             print("   (no wake word — ignored)")
             continue
 

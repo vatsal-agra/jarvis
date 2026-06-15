@@ -50,6 +50,17 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 - **Local document Q&A** — ask questions about a `.txt/.md/.csv/.pdf/.docx` file.
 - **Live system telemetry** — CPU / RAM / GPU / VRAM / temp / battery stream to
   the HUD in real time.
+- **Self-healing clicks** — if a click can't be matched in the DOM, Jarvis
+  automatically falls back to vision (Set-of-Marks) and clicks it anyway.
+- **Live plan view** — for multi-step tasks Jarvis declares a plan that appears
+  on the HUD as a checklist and ticks off in real time as it works.
+- **Type to Jarvis** — a command bar in the HUD lets you control it by typing,
+  not just voice (POST to the local server → straight into the command loop).
+- **Daily briefing & routines** — "brief me" gives a spoken greeting + weather +
+  headlines + reminders; an optional `jarvis_routines.json` fires it automatically
+  at a set time each day.
+- **News** (free, keyless via Google News RSS) and a **safe calculator** (local,
+  instant, no quota).
 - **Interrupt anytime** — press **ESC** to stop the current task mid-action.
 - **Live HUD** — a cinematic web dashboard (zero extra dependencies, served from
   Python over Server-Sent Events) that visualises the assistant in real time:

@@ -102,6 +102,23 @@ body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14p
 .toast.ok{border-color:rgba(52,211,153,.5);color:#bff7e0}
 .empty{color:var(--ink-dim);font-size:11px;font-style:italic;letter-spacing:1px;opacity:.7}
 
+/* plan bar */
+.planbar{position:fixed;top:74px;left:50%;transform:translateX(-50%);z-index:25;display:none;gap:10px;
+  background:rgba(8,16,28,.82);border:1px solid var(--line);border-radius:30px;padding:8px 16px;
+  backdrop-filter:blur(6px);max-width:78vw;flex-wrap:wrap;justify-content:center;box-shadow:0 6px 30px rgba(0,0,0,.5)}
+.planbar.show{display:flex}
+.pstep{font-size:10px;letter-spacing:1px;color:var(--ink-dim);display:flex;align-items:center;gap:6px}
+.pstep .b{width:15px;height:15px;border-radius:50%;border:1px solid var(--line);display:grid;place-items:center;font-size:8px;flex:none}
+.pstep.done{color:var(--green)} .pstep.done .b{background:var(--green);border-color:var(--green);color:#012}
+.pstep.cur{color:var(--accent)} .pstep.cur .b{border-color:var(--accent);box-shadow:0 0 8px var(--accent-glow)}
+/* command input */
+.cmdbar{position:fixed;bottom:62px;left:50%;transform:translateX(-50%);z-index:25;width:min(560px,68vw)}
+.cmdbar input{width:100%;background:rgba(8,16,28,.85);border:1px solid var(--line);border-radius:30px;
+  padding:11px 18px;color:var(--ink);font-family:var(--font);font-size:13px;letter-spacing:.5px;outline:none;
+  backdrop-filter:blur(6px);box-shadow:0 6px 24px rgba(0,0,0,.45);transition:border-color .3s,box-shadow .3s}
+.cmdbar input:focus{border-color:var(--accent);box-shadow:0 0 22px var(--accent-glow)}
+.cmdbar input::placeholder{color:var(--ink-dim)}
+
 /* boot sequence */
 #boot{position:fixed;inset:0;z-index:60;background:radial-gradient(circle at 50% 50%,#06121f,#02050a 70%);
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;transition:opacity .9s ease}
@@ -121,6 +138,8 @@ body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14p
 <body>
 <div class="bg-grid"></div><div class="bg-scan"></div><div class="vignette"></div>
 <div class="toasts" id="toasts"></div>
+<div class="planbar" id="planbar"></div>
+<div class="cmdbar"><input id="cmd" placeholder="⌨  type a command for Jarvis…  (Enter to send)" autocomplete="off" spellcheck="false"></div>
 
 <div id="boot">
   <div class="boot-title">J·A·R·V·I·S</div>
@@ -230,6 +249,11 @@ function toast(text,lvl){const t=document.createElement('div');t.className='toas
 function pushLevel(v){targetLevel=Math.max(0,Math.min(1,v));lastLevelAt=performance.now();}
 function setBar(id,pct){const e=document.getElementById(id);if(!e)return;e.style.width=Math.max(0,Math.min(100,pct))+'%';
   const bar=e.parentElement;bar.classList.toggle('warn',pct>=70&&pct<90);bar.classList.toggle('full',pct>=90);}
+function setPlan(steps,done){const bar=$('#planbar');
+  if(!steps||!steps.length){bar.classList.remove('show');bar.innerHTML='';return;}
+  bar.classList.add('show');
+  bar.innerHTML=steps.map((s,i)=>{const cls=i<done?'done':(i===done?'cur':'');
+    const mark=i<done?'✓':(i+1);return `<span class="pstep ${cls}"><span class="b">${mark}</span>${s}</span>`;}).join('');}
 function setVitals(v){
   if(typeof v.cpu==='number'){setBar('v-cpu',v.cpu);$('#v-cpu-n').textContent=v.cpu+'%';}
   if(typeof v.ram==='number'){setBar('v-ram',v.ram);$('#v-ram-n').textContent=v.ram+'%';}
@@ -254,6 +278,7 @@ function dispatch(m){switch(m.kind){
   case'memory':{if(typeof m.count==='number')$('#s-mem').textContent=m.count;
     if(m.recalled){const b=$('#s-mem');b.style.textShadow='0 0 14px var(--accent-glow)';setTimeout(()=>b.style.textShadow='',900);}break;}
   case'vitals':setVitals(m);break;
+  case'plan':setPlan(m.steps,m.done||0);break;
   case'toast':toast(m.text,m.level);break;
   case'online':{const d=$('#conn-dot');d.classList.toggle('off',!m.up);$('#conn').textContent=m.up?'ONLINE':'OFFLINE';break;}
 }}
@@ -380,6 +405,15 @@ function connect(){try{const es=new EventSource('/events');
 resize();setState('standby','ready');requestAnimationFrame(frame);
 boot(()=>connect());
 
+/* typed-command bar → POST to the Python backend */
+const cmd=$('#cmd');
+if(cmd)cmd.addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&cmd.value.trim()){
+    const text=cmd.value.trim();cmd.value='';
+    fetch('/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})}).catch(()=>{});
+    toast('⌨ sent: '+text.slice(0,40),'info');
+  }});
+
 /* simulated vitals when no backend is connected (keeps the panel alive offline) */
 let vitalsLive=false;
 setInterval(()=>{if(vitalsLive)return;const r=()=>Math.round(20+Math.random()*60);
@@ -398,19 +432,20 @@ window.JARVIS={dispatch,pushLevel,
    [1900,()=>dispatch({kind:'state',state:'thinking',sub:'reasoning'})],
    [2100,()=>dispatch({kind:'brain',provider:'gemini',model:'gemini-2.5-flash',key:2})],
    [2200,()=>{dispatch({kind:'memory',count:14,recalled:2});dispatch({kind:'toast',text:'🧠 recalled 2 memories',level:'info'});}],
+   [2350,()=>dispatch({kind:'plan',steps:['Research AI news','Open LinkedIn','Draft post','Publish','Verify'],done:0})],
    [2300,()=>dispatch({kind:'quota',usage:[{key:1,model:'gemini-2.5-flash',used:20,limit:20},{key:2,model:'gemini-2.5-flash',used:7,limit:20},{key:3,model:'gemini-2.5-flash',used:2,limit:20}]})],
    [2600,()=>{dispatch({kind:'state',state:'acting',sub:'searching the web'});dispatch({kind:'tool',name:'web_search',summary:'AI news this week'});}],
-   [3300,()=>dispatch({kind:'tool',name:'web_search',status:'ok',detail:'12 results'})],
+   [3300,()=>{dispatch({kind:'tool',name:'web_search',status:'ok',detail:'12 results'});dispatch({kind:'plan',steps:['Research AI news','Open LinkedIn','Draft post','Publish','Verify'],done:1});}],
    [3500,()=>dispatch({kind:'tool',name:'browser_navigate',summary:'linkedin.com/feed'})],
-   [4100,()=>dispatch({kind:'tool',name:'browser_navigate',status:'ok',detail:'Feed | LinkedIn'})],
+   [4100,()=>{dispatch({kind:'tool',name:'browser_navigate',status:'ok',detail:'Feed | LinkedIn'});dispatch({kind:'plan',steps:['Research AI news','Open LinkedIn','Draft post','Publish','Verify'],done:2});}],
    [4300,()=>dispatch({kind:'tool',name:'browser_click',summary:'[27] Start a post'})],
    [4900,()=>dispatch({kind:'tool',name:'browser_click',status:'ok',detail:'composer opened'})],
    [5100,()=>dispatch({kind:'tool',name:'browser_type',summary:'[2] editor — drafting'})],
-   [5900,()=>dispatch({kind:'tool',name:'browser_type',status:'ok',detail:'text in editor'})],
+   [5900,()=>{dispatch({kind:'tool',name:'browser_type',status:'ok',detail:'text in editor'});dispatch({kind:'plan',steps:['Research AI news','Open LinkedIn','Draft post','Publish','Verify'],done:3});}],
    [6100,()=>dispatch({kind:'tool',name:'browser_click',summary:'[31] Post'})],
-   [6700,()=>dispatch({kind:'tool',name:'browser_click',status:'ok',detail:'clicked'})],
+   [6700,()=>{dispatch({kind:'tool',name:'browser_click',status:'ok',detail:'clicked'});dispatch({kind:'plan',steps:['Research AI news','Open LinkedIn','Draft post','Publish','Verify'],done:4});}],
    [6800,()=>{dispatch({kind:'toast',text:'👁 verifying with vision…',level:'info'});dispatch({kind:'tool',name:'look_at_page',summary:'did the post publish?'});}],
-   [7400,()=>{dispatch({kind:'tool',name:'look_at_page',status:'ok',detail:'post is live on feed ✓'});dispatch({kind:'task'});}],
+   [7400,()=>{dispatch({kind:'tool',name:'look_at_page',status:'ok',detail:'post is live on feed ✓'});dispatch({kind:'plan',steps:['Research AI news','Open LinkedIn','Draft post','Publish','Verify'],done:5});dispatch({kind:'task'});}],
    [6900,()=>{dispatch({kind:'state',state:'speaking',sub:'responding'});J.voice(2200,0.35);}],
    [7000,()=>dispatch({kind:'jarvis',text:'Done — your weekly AI roundup is posted to LinkedIn.'})],
    [9400,()=>dispatch({kind:'state',state:'standby',sub:'ready'})],
