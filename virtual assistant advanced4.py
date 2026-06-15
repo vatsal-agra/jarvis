@@ -21,6 +21,7 @@ Install:
 import asyncio
 import datetime
 import json
+import math
 import os
 import random as _random
 import re
@@ -275,15 +276,21 @@ try:
                 fname = pool.submit(lambda: asyncio.run(_tts_async(text))).result(timeout=30)
             pygame.mixer.music.load(fname)
             pygame.mixer.music.play()
+            _spk = 0
             while pygame.mixer.music.get_busy():
                 if _ABORT.is_set():           # ESC pressed → cut speech short
                     pygame.mixer.music.stop()
                     break
-                pygame.time.wait(50)
+                # Drive the reactor with a lively "talking" envelope while audio plays.
+                _spk += 1
+                env = 0.45 + 0.35 * abs(math.sin(_spk * 0.6)) + 0.15 * abs(math.sin(_spk * 1.9))
+                _hud_emit("level", v=min(1.0, env))
+                pygame.time.wait(60)
             pygame.mixer.music.unload()
             os.unlink(fname)
         except Exception as e:
             print(f"[TTS Error] {e}")
+        _hud_emit("level", v=0.0)
         _hud_emit("state", state="standby", sub="ready")
 
 except ImportError:
@@ -363,12 +370,19 @@ def takeCommand() -> str:
     consec_speech  = 0         # consecutive chunks above START_THRESH
     silence_count  = 0         # consecutive chunks below END_THRESH
     total_waited   = 0
+    lvl_tick       = 0         # throttles HUD audio-level emits
 
     try:
         while True:
             raw     = stream.read(CHUNK, exception_on_overflow=False)
             samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
             prob    = model(torch.from_numpy(samples), RATE).item()
+
+            # Stream the live mic amplitude to the HUD reactor (every ~64 ms).
+            lvl_tick += 1
+            if lvl_tick % 2 == 0:
+                rms = float(np.sqrt(np.mean(samples * samples)))
+                _hud_emit("level", v=min(1.0, rms * 7.0))
 
             if not speech_started:
                 # Keep a short pre-roll buffer so we don't clip the first syllable

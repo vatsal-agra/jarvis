@@ -26,9 +26,16 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 - **Interrupt anytime** — press **ESC** to stop the current task mid-action.
 - **Live HUD** — a cinematic web dashboard (zero extra dependencies, served from
   Python over Server-Sent Events) that visualises the assistant in real time:
-  reactor core, transcript, streaming action feed, active brain/key, and a
-  Gemini daily-quota meter. Opens automatically on startup; set `JARVIS_HUD_PORT`
-  to change the port (default `8765`).
+  - a hand-written **canvas reactor** — a particle-field energy core with a
+    rotating arc assembly and a frequency-spectrum ring that **reacts to your
+    actual microphone amplitude** while it listens, and to the speech envelope
+    while it talks (the core also shifts colour with state);
+  - a cinematic **boot sequence**, depth **parallax** on mouse-move, live
+    transcript, streaming action feed, active brain/key pill, and a Gemini
+    daily-quota meter.
+
+  Opens automatically on startup; set `JARVIS_HUD_PORT` to change the port
+  (default `8765`).
 
 ## Setup
 
