@@ -1,20 +1,22 @@
 #!/usr/bin/env python
 """
-Jarvis — Local AI Voice Assistant
+Jarvis — AI Voice Assistant
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Brain      : Gemini 2.5 Flash (free tier, multi-key rotation)
-             with local qwen2.5:7b via Ollama as offline fallback
+Brain      : Google Gemini 2.5 (free tier, multi-key + multi-model rotation)
+             fully cloud — nothing runs on the local GPU
+Vision     : Gemini multimodal (sees screen + browser)
 Web        : Playwright   persistent Chrome (DOM-based, 99% reliable)
 Search     : DuckDuckGo   (free, no key)
-Native apps: pywinauto    (Windows accessibility API, not pixels)
+Native apps: pywinauto + pyautogui (Windows accessibility + desktop control)
 TTS        : edge-tts     Microsoft Neural voices
 STT        : SpeechRecognition + Google API
 
 Install:
     pip install SpeechRecognition pyaudio edge-tts pygame wikipedia
-              deep-translator pyshorteners ollama requests ddgs
-              playwright pywinauto
+              deep-translator pyshorteners requests ddgs playwright pywinauto
+              keyboard psutil pyperclip pypdf python-docx Pillow pyautogui
     python -m playwright install chromium
+Keys: put JARVIS_GEMINI_KEYS=key1,key2,... in a .env file (or jarvis_keys.txt).
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -97,7 +99,10 @@ def _install_abort_hotkey() -> str:
         return "Press Enter in this window any time to stop the current task."
     return "Press ESC any time to stop the current task."
 
-import ollama
+try:
+    import ollama          # optional — only used if you re-enable a local fallback
+except Exception:
+    ollama = None
 import requests
 import speech_recognition as sr
 import wikipedia
@@ -2277,21 +2282,39 @@ Games available: breakout, car arcade, obstacle course, space invaders, football
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  BRAIN  ─  Ollama agentic loop
+#  BRAIN  ─  Google Gemini (fully cloud, no local GPU)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ── Brain configuration ──────────────────────────────────────────────────────
-# Primary brain: Google Gemini (free tier) via its OpenAI-compatible endpoint —
-# our TOOLS are already in OpenAI format, so they work as-is. Multiple API keys
-# are rotated automatically when one hits its rate limit (HTTP 429). If every key
-# is exhausted or the network is down, Jarvis falls back to the local Ollama
-# model so it keeps working offline.
+# Brain: Google Gemini (free tier) via its OpenAI-compatible endpoint — our TOOLS
+# are already in OpenAI format, so they work as-is. Multiple API keys are rotated
+# automatically when one hits its daily rate limit (HTTP 429), and within each key
+# we fall through across models. Nothing runs locally on the GPU.
 #
+def _load_dotenv() -> None:
+    """Load KEY=VALUE pairs from a local, git-ignored `.env` file into the
+    environment (without overriding anything already set). Lets you keep your
+    Gemini keys in `.env`, e.g.  JARVIS_GEMINI_KEYS=key1,key2,key3"""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    except FileNotFoundError:
+        pass
+
+
+_load_dotenv()
+
+
 # Keys are loaded from (in order of priority):
-#   1. the JARVIS_GEMINI_KEYS env var (comma-separated), or
+#   1. the JARVIS_GEMINI_KEYS env var / .env file (comma-separated), or
 #   2. a local, GIT-IGNORED file `jarvis_keys.txt` next to this script — one key
 #      per line, blank lines and #-comments ignored.
 # Keys are NEVER hardcoded here, so this file is safe to commit/share publicly.
-# See jarvis_keys.txt.example for the format.
 def _load_gemini_keys() -> list:
     env = [k.strip() for k in os.environ.get("JARVIS_GEMINI_KEYS", "").split(",") if k.strip()]
     if env:
@@ -2311,9 +2334,8 @@ GEMINI_KEYS = _load_gemini_keys()
 # quota — not the per-minute rate — is the real ceiling. Because the quota is
 # per model, gemini-2.5-flash and gemini-2.5-flash-lite each have their OWN
 # 20/day pool: we try flash first, then fall through to flash-lite (free extra
-# budget) before dropping to local Ollama. Override the whole list with
-# JARVIS_GEMINI_MODELS (comma-separated) or a single model with
-# JARVIS_GEMINI_MODEL.
+# budget). Override the whole list with JARVIS_GEMINI_MODELS (comma-separated)
+# or a single model with JARVIS_GEMINI_MODEL.
 GEMINI_MODELS = (
     [m.strip() for m in os.environ.get("JARVIS_GEMINI_MODELS", "").split(",") if m.strip()]
     or ([os.environ["JARVIS_GEMINI_MODEL"]] if os.environ.get("JARVIS_GEMINI_MODEL") else [])
@@ -2321,7 +2343,6 @@ GEMINI_MODELS = (
 )
 GEMINI_MODEL = GEMINI_MODELS[0]   # primary (used for the startup reachability probe)
 GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-OLLAMA_MODEL = "qwen2.5:7b"
 
 _gemini_key_idx = 0          # index of the key that last worked — rotation starts here
 _gemini_last_model = GEMINI_MODEL   # model that actually served the last request
@@ -2353,7 +2374,7 @@ def _gemini_request(messages, tools, temperature) -> dict:
     model, fall through to the next model in GEMINI_MODELS — each model has its
     own separate daily free quota, so this is genuinely extra free budget.
     Returns the assistant message dict (OpenAI format). Raises RuntimeError if
-    no key/model combination could serve it (caller then falls back to Ollama)."""
+    no key/model combination could serve it (the caller surfaces the error)."""
     global _gemini_key_idx, _gemini_last_model
     if not GEMINI_KEYS:
         raise RuntimeError("no Gemini keys configured")
@@ -2561,60 +2582,6 @@ def _mem_search(query: str, k: int = 4, threshold: float = 0.30):
     scored = [(m["text"], _cosine(qv, m["vec"])) for m in _MEM if m.get("vec")]
     scored.sort(key=lambda x: x[1], reverse=True)
     return [(t, s) for t, s in scored[:k] if s >= threshold]
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  PASSIVE LEARNING  ─  auto-extract durable facts after each exchange
-#  Uses the LOCAL Ollama model so it costs ZERO Gemini quota, then stores
-#  any facts via the free embeddings memory above. Jarvis learns silently.
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_LEARN_PROMPT = (
-    "You extract durable, long-term facts about the USER from a conversation turn. "
-    "Return ONLY a JSON array of short standalone sentences (max 3) capturing lasting "
-    "facts worth remembering: preferences, identity, accounts, location, recurring needs, "
-    "how they like things done. IGNORE one-off task details, questions, and chit-chat. "
-    "If nothing is durable, return []. No prose, JSON array only.\n\n"
-    "USER: {user}\nASSISTANT: {asst}"
-)
-
-
-def _extract_facts(user_text: str, asst_text: str):
-    """Ask the local model for durable facts. Returns a list[str] (possibly empty)."""
-    prompt = _LEARN_PROMPT.format(user=user_text[:600], asst=asst_text[:600])
-    raw = ""
-    try:
-        resp = ollama.chat(model=OLLAMA_MODEL,
-                           messages=[{"role": "user", "content": prompt}],
-                           options={"temperature": 0.1})
-        raw = (resp.message.content or "").strip()
-    except Exception:
-        return []
-    m = re.search(r"\[.*\]", raw, re.S)        # pull the JSON array out of any wrapper
-    if not m:
-        return []
-    try:
-        facts = json.loads(m.group(0))
-    except Exception:
-        return []
-    return [str(f).strip() for f in facts if isinstance(f, (str,)) and str(f).strip()][:3]
-
-
-def _learn_async(user_text: str, asst_text: str) -> None:
-    """Background passive-learning pass — never blocks the main loop."""
-    def _run():
-        try:
-            facts = _extract_facts(user_text, asst_text)
-            n = 0
-            for f in facts:
-                if _mem_add(f):
-                    n += 1
-                    print(f"   🧠 learned: {f}")
-            if n:
-                _hud_emit("toast", text=f"🧠 learned {n} new fact(s)", level="ok")
-                _hud_emit("memory", count=len(_MEM))
-        except Exception:
-            pass
-    threading.Thread(target=_run, daemon=True).start()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3461,64 +3428,13 @@ def _mission(goal: str, max_rounds: int = 12) -> str:
     return final
 
 
-def _to_ollama_messages(messages):
-    """Convert OpenAI-format messages to what the Ollama client expects. The key
-    difference: OpenAI tool_calls store `arguments` as a JSON STRING, but Ollama's
-    pydantic model requires a dict. Without this, falling back to Ollama after
-    Gemini fails crashes with a validation error."""
-    out = []
-    for m in messages:
-        m = dict(m)
-        if m.get("tool_calls"):
-            fixed = []
-            for tc in m["tool_calls"]:
-                args = tc["function"].get("arguments")
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args or "{}")
-                    except Exception:
-                        args = {}
-                fixed.append({"function": {"name": tc["function"]["name"],
-                                           "arguments": args}})
-            m["tool_calls"] = fixed
-        out.append(m)
-    return out
-
-
-def _ollama_request(messages, tools, temperature) -> dict:
-    """Call the local Ollama model and return an OpenAI-format assistant dict."""
-    resp = ollama.chat(
-        model=OLLAMA_MODEL, messages=_to_ollama_messages(messages), tools=tools,
-        options={"temperature": temperature},
-    )
-    m = resp.message
-    out = {"role": "assistant", "content": m.content or ""}
-    tcs = []
-    for i, tc in enumerate(m.tool_calls or []):
-        tcs.append({
-            "id": f"call_{i}",
-            "type": "function",
-            "function": {"name": tc.function.name,
-                         "arguments": json.dumps(dict(tc.function.arguments))},
-        })
-    if tcs:
-        out["tool_calls"] = tcs
-    return out
-
-
 def brain_chat(messages, tools, temperature):
-    """Return (assistant_message_dict, brain_label). Tries Gemini first, then
-    falls back to local Ollama."""
-    try:
-        msg = _gemini_request(messages, tools, temperature)
-        _hud_emit("brain", provider="gemini", model=_gemini_last_model, key=_gemini_key_idx + 1)
-        return _sanitize_assistant(msg), f"Gemini ({_gemini_last_model}, key {_gemini_key_idx + 1})"
-    except Exception as e:
-        print(f"   ⚠ Gemini unavailable ({e}) → using local Ollama")
-        _hud_emit("toast", text="Gemini unavailable — switching to local Ollama", level="warn")
-        _hud_emit("brain", provider="ollama", model=OLLAMA_MODEL)
-        msg = _ollama_request(messages, tools, temperature)
-        return _sanitize_assistant(msg), f"Ollama ({OLLAMA_MODEL})"
+    """Return (assistant_message_dict, brain_label). Fully Gemini — rotates across
+    keys and models. If every key/model is unavailable it raises, and the caller
+    reports the error (no local model runs, so nothing touches the GPU)."""
+    msg = _gemini_request(messages, tools, temperature)
+    _hud_emit("brain", provider="gemini", model=_gemini_last_model, key=_gemini_key_idx + 1)
+    return _sanitize_assistant(msg), f"Gemini ({_gemini_last_model}, key {_gemini_key_idx + 1})"
 
 
 def process_command(user_input: str, history: list) -> tuple[str, list]:
@@ -3621,32 +3537,9 @@ def _gemini_available() -> bool:
                 json=body, timeout=15,
             )
         except Exception:
-            return False   # network down → offline, use Ollama
+            return False   # network down → Gemini unreachable
         if r.status_code in (200, 429, 503):
             return True
-    return False
-
-
-def ensure_ollama_running() -> bool:
-    try:
-        requests.get("http://localhost:11434", timeout=2)
-        return True
-    except Exception:
-        pass
-    print("Starting Ollama server...")
-    subprocess.Popen(
-        ["ollama", "serve"],
-        creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    for _ in range(12):
-        time.sleep(1)
-        try:
-            requests.get("http://localhost:11434", timeout=2)
-            return True
-        except Exception:
-            pass
     return False
 
 
@@ -3692,7 +3585,7 @@ if __name__ == "__main__":
 
     print("=" * 62)
     print("  JARVIS  —  AI Assistant")
-    print(f"  Brain  : Gemini {' → '.join(GEMINI_MODELS)}  ({len(GEMINI_KEYS)} keys)  +  Ollama fallback")
+    print(f"  Brain  : Gemini {' → '.join(GEMINI_MODELS)}  ({len(GEMINI_KEYS)} keys, fully cloud — no local GPU)")
     print("  Web    : Playwright Chromium  (DOM-based, reliable)")
     print("  Search : DuckDuckGo  (real-time, free)")
     print("  Apps   : pywinauto   (Windows accessibility API)")
@@ -3702,34 +3595,22 @@ if __name__ == "__main__":
     print("=" * 62)
 
     print("Checking AI brain...")
+    if not GEMINI_KEYS:
+        print("No Gemini keys found. Add them to .env (JARVIS_GEMINI_KEYS=key1,key2) "
+              "or jarvis_keys.txt.")
+        speak("I have no Gemini keys configured. Please add your keys and restart.")
+        exit(1)
     if _gemini_available():
         _hud_emit("online", up=True)
         _hud_emit("brain", provider="gemini", model=GEMINI_MODEL, key=1)
-        print(f"Brain ready: Gemini {GEMINI_MODEL} ({len(GEMINI_KEYS)} key(s)). "
-              "Local Ollama armed as fallback.\n")
-        # Start the Ollama server in the background so fallback is instant if
-        # needed — but DON'T warm the model (saves ~4 GB VRAM while Gemini leads).
-        try:
-            ensure_ollama_running()
-        except Exception:
-            pass
+        print(f"Brain ready: Gemini ({len(GEMINI_KEYS)} key(s), {len(GEMINI_MODELS)} models). "
+              "Fully cloud — nothing runs on your GPU.\n")
     else:
-        print("Gemini not reachable — using local Ollama brain.")
+        # Keys exist but Gemini is unreachable right now (likely no internet).
         _hud_emit("online", up=False)
-        _hud_emit("brain", provider="ollama", model=OLLAMA_MODEL)
-        if not ensure_ollama_running():
-            speak("Could not reach any AI brain. Check your internet, or start Ollama.")
-            exit(1)
-        print("Loading model into GPU memory...")
-        try:
-            ollama.chat(
-                model=OLLAMA_MODEL,
-                messages=[{"role": "user", "content": "hi"}],
-                options={"num_predict": 1},
-            )
-            print("Model ready.\n")
-        except Exception:
-            pass
+        print("⚠ Gemini not reachable right now (check your internet). "
+              "Jarvis needs the network to think.")
+        speak("I can't reach Gemini right now. Please check your internet connection.")
 
     wish()
 
@@ -3819,7 +3700,8 @@ if __name__ == "__main__":
 
         _hud_emit("task")     # one task completed → bump the counter
         speak(response)
-        _learn_async(clean, response)   # passively extract & remember durable facts
+        # Durable facts are captured in-turn by the model's `remember` tool (see
+        # system prompt) — no separate local-model pass, so the GPU stays free.
         awaiting_followup = True         # open a follow-up window for a natural back-and-forth
 
         time.sleep(0.3)

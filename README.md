@@ -15,9 +15,8 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 ## Features
 
 - **Voice in/out** — speech recognition (Google STT) + neural TTS (edge-tts).
-- **LLM brain** — Google Gemini 2.5 Flash (free tier) with automatic multi-key
-  and multi-model rotation, falling back to a **local Ollama** model
-  (`qwen2.5:7b`) when offline or rate-limited.
+- **LLM brain** — Google Gemini 2.5 (free tier) with automatic multi-key and
+  multi-model rotation. **Fully cloud — nothing runs on your local GPU.**
 - **Vision (multimodal)** — Jarvis can *see*. It can look at your **screen**
   (`look_at_screen`) to read an error or describe what's open, and look at the
   **live browser page** (`look_at_page`) to *visually verify* an action
@@ -39,8 +38,8 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
   canvas), Jarvis screenshots the page, overlays numbered markers on every
   element (Set-of-Marks), and asks Gemini which one matches your description —
   then clicks it precisely. Operates UIs that text-matching can't.
-- **Passive learning** — after each exchange a *local* Ollama pass quietly
-  extracts durable facts about you and stores them in memory (zero Gemini quota).
+- **Learns about you** — the model saves durable facts in-conversation (via its
+  `remember` tool) so memory builds up over time, with no local model involved.
 - **Conversational follow-ups** — after a reply, Jarvis listens briefly so you
   can keep talking without saying "Jarvis" again.
 - **Reminders & timers** — "remind me in 20 minutes to…"; a scheduler speaks it
@@ -102,24 +101,27 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 
 ```bash
 pip install SpeechRecognition pyaudio edge-tts pygame wikipedia \
-            deep-translator pyshorteners ollama requests ddgs \
+            deep-translator pyshorteners requests ddgs \
             playwright pywinauto keyboard \
             psutil pyperclip pypdf python-docx Pillow pyautogui
 python -m playwright install chromium
 ```
 
+The brain is **fully cloud (Gemini)** — no Ollama / local model / GPU required.
+
 ### API keys
 
 Keys are **not** stored in the source. Provide Google Gemini keys one of two ways:
 
-1. Copy `jarvis_keys.txt.example` to `jarvis_keys.txt` and paste your keys
-   (one per line). This file is git-ignored.
-2. Or set the `JARVIS_GEMINI_KEYS` environment variable (comma-separated).
+1. Copy `.env.example` to `.env` and set
+   `JARVIS_GEMINI_KEYS=key1,key2,key3,...` (comma-separated). Git-ignored.
+2. Or copy `jarvis_keys.txt.example` to `jarvis_keys.txt` (one key per line).
 
 Get free keys at <https://aistudio.google.com/apikey> (one per Google account).
 The free tier allows ~20 requests/day per key **per model**, and the app rotates
 across keys and across `gemini-2.5-flash` → `gemini-2.5-flash-lite` to stretch
-that budget before falling back to local Ollama.
+that budget. With 5–6 keys that's ~200–240 generate requests/day. (Embeddings,
+weather, news, crypto, units and the calculator don't touch that budget.)
 
 Optional env overrides: `JARVIS_GEMINI_MODELS` (comma-separated model fallback
 chain), `JARVIS_GEMINI_MODEL` (single model).
