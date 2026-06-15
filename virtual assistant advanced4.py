@@ -1290,6 +1290,87 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_scroll",
+            "description": (
+                "Scroll the current page when what you need is below/above the fold. Returns a "
+                "fresh snapshot of the now-visible elements. Use if a snapshot didn't show the "
+                "element you expected."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string", "enum": ["down", "up", "top", "bottom"],
+                                  "description": "Which way to scroll."}
+                },
+                "required": ["direction"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_tab",
+            "description": "Manage browser tabs: open a new tab (optionally at a URL), list open tabs, or switch to a tab by index.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["new", "list", "switch", "close"]},
+                    "url": {"type": "string", "description": "URL for action=new (optional)."},
+                    "index": {"type": "integer", "description": "Tab index for switch/close."}
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Create/overwrite a local file with text content (.txt .md .csv code, or .docx). Use to save notes, drafts, code or documents the user asks you to write.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Full destination path."},
+                    "content": {"type": "string", "description": "The full file contents."}
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_currency",
+            "description": "Convert an amount between currencies using live free exchange rates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number"},
+                    "from_currency": {"type": "string", "description": "3-letter code, e.g. USD."},
+                    "to_currency": {"type": "string", "description": "3-letter code, e.g. INR."}
+                },
+                "required": ["amount", "from_currency", "to_currency"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "media_control",
+            "description": "Control system media playback (Spotify, YouTube, any player) via media keys.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "enum": ["play", "pause", "next", "previous", "stop", "volup", "voldown", "mute"]}
+                },
+                "required": ["action"],
+            },
+        },
+    },
 ]
 
 
@@ -1731,6 +1812,75 @@ def execute_tool(name: str, args: dict) -> str:
     elif name == "complete_step":
         return _complete_step(args.get("index", 0))
 
+    # ── browser_scroll ──────────────────────────────────────────────────────────
+    elif name == "browser_scroll":
+        d = (args.get("direction") or "down").lower()
+        try:
+            page = _get_page()
+            js = {"down": "window.scrollBy(0, window.innerHeight*0.85)",
+                  "up": "window.scrollBy(0, -window.innerHeight*0.85)",
+                  "top": "window.scrollTo(0, 0)",
+                  "bottom": "window.scrollTo(0, document.body.scrollHeight)"}.get(d,
+                  "window.scrollBy(0, window.innerHeight*0.85)")
+            page.evaluate(js)
+            _settle(page, idle_ms=1500, pause=0.4)
+            snap = execute_tool("browser_snapshot", {})
+            return f"Scrolled {d}. Page now:\n\n{snap}"
+        except Exception as e:
+            return f"Scroll error: {e}"
+
+    # ── browser_tab ──────────────────────────────────────────────────────────---
+    elif name == "browser_tab":
+        global _pw_page
+        action = (args.get("action") or "list").lower()
+        try:
+            page = _get_page()
+            ctx = page.context
+            if action == "new":
+                np = ctx.new_page()
+                _pw_page = np
+                url = args.get("url", "")
+                if url:
+                    if not url.startswith("http"):
+                        url = "https://" + url
+                    np.goto(url, wait_until="domcontentloaded", timeout=25000)
+                    _settle(np)
+                return f"Opened a new tab.\n\n{execute_tool('browser_snapshot', {})}"
+            pages = [p for p in ctx.pages if not p.is_closed()]
+            if action == "list":
+                return "Open tabs:\n" + "\n".join(
+                    f"  [{i}] {p.title()[:50]}  ({p.url[:60]})" for i, p in enumerate(pages))
+            idx = int(args.get("index", 0))
+            if not (0 <= idx < len(pages)):
+                return f"No tab [{idx}]. There are {len(pages)} tabs."
+            if action == "switch":
+                _pw_page = pages[idx]
+                _pw_page.bring_to_front()
+                return f"Switched to tab [{idx}].\n\n{execute_tool('browser_snapshot', {})}"
+            if action == "close":
+                pages[idx].close()
+                _pw_page = None
+                return f"Closed tab [{idx}]."
+            return f"Unknown tab action '{action}'."
+        except Exception as e:
+            return f"Tab error: {e}"
+
+    # ── write_file ──────────────────────────────────────────────────────────────
+    elif name == "write_file":
+        return _write_file(args.get("path", ""), args.get("content", ""))
+
+    # ── convert_currency ─────────────────────────────────────────────────────────
+    elif name == "convert_currency":
+        try:
+            amt = float(args.get("amount", 0))
+        except Exception:
+            amt = 0.0
+        return _convert_currency(amt, args.get("from_currency", ""), args.get("to_currency", ""))
+
+    # ── media_control ─────────────────────────────────────────────────────────--
+    elif name == "media_control":
+        return _media_control(args.get("action", ""))
+
     return f"Unknown tool: {name}"
 
 
@@ -1766,6 +1916,11 @@ Any math / calculation                  → calculate
 Set a reminder / timer                  → set_reminder
 Use text the user has copied            → read_clipboard
 Answer questions about a local file     → ask_file
+Save/write a file or document           → write_file
+Convert currency                        → convert_currency
+Play/pause/next music or volume         → media_control
+Reveal off-screen page content          → browser_scroll
+Work across multiple tabs               → browser_tab
 
 ━━ SHOW YOUR PLAN ━━
 For any task with 3 or more steps, FIRST call set_plan with the ordered steps — it
@@ -2325,11 +2480,18 @@ def _rem_save():
         pass
 
 
+def _emit_reminders():
+    with _REM_LOCK:
+        rows = sorted(({"text": r["text"], "at": r["at"]} for r in _REMINDERS), key=lambda r: r["at"])
+    _hud_emit("reminders", items=rows)
+
+
 def _set_reminder(text: str, delay_seconds: int) -> str:
     when = time.time() + max(1, int(delay_seconds))
     with _REM_LOCK:
         _REMINDERS.append({"text": text, "at": when})
         _rem_save()
+    _emit_reminders()
     mins = max(1, round(delay_seconds / 60))
     _hud_emit("toast", text=f"⏰ reminder set ({mins} min)", level="ok")
     return f"Reminder set. I'll remind you in about {mins} minute(s)."
@@ -2346,6 +2508,8 @@ def _reminder_loop() -> None:
             if due:
                 _REMINDERS[:] = keep
                 _rem_save()
+        if due:
+            _emit_reminders()
         for r in due:
             _hud_emit("toast", text=f"⏰ {r['text']}", level="warn")
             try:
@@ -2537,6 +2701,59 @@ def _complete_step(index) -> str:
     _PLAN["done"] = max(_PLAN["done"], i + 1)
     _hud_emit("plan", steps=_PLAN["steps"], done=_PLAN["done"])
     return "Step marked done."
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  WRITE FILES  ·  CURRENCY  ·  MEDIA KEYS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _write_file(path: str, content: str) -> str:
+    """Save text/markdown/code (or a .docx) to disk. Creates parent dirs."""
+    path = os.path.expanduser(path.strip().strip('"'))
+    try:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        if path.lower().endswith(".docx"):
+            import docx
+            doc = docx.Document()
+            for line in content.split("\n"):
+                doc.add_paragraph(line)
+            doc.save(path)
+        else:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+        return f"Saved {len(content)} characters to {path}."
+    except Exception as e:
+        return f"Couldn't write the file: {e}"
+
+
+def _convert_currency(amount: float, frm: str, to: str) -> str:
+    frm, to = frm.upper().strip(), to.upper().strip()
+    try:
+        data = requests.get(f"https://open.er-api.com/v6/latest/{frm}", timeout=10).json()
+        rate = (data.get("rates") or {}).get(to)
+        if not rate:
+            return f"Couldn't get a {frm}->{to} rate."
+        return f"{amount} {frm} = {round(amount * rate, 2)} {to} (rate {round(rate, 4)})."
+    except Exception as e:
+        return f"Currency error: {e}"
+
+
+def _media_control(action: str) -> str:
+    keymap = {"play": "play/pause media", "pause": "play/pause media",
+              "playpause": "play/pause media", "next": "next track",
+              "previous": "previous track", "prev": "previous track",
+              "stop": "stop media", "volup": "volume up", "voldown": "volume down",
+              "mute": "volume mute"}
+    key = keymap.get(action.lower().replace(" ", ""))
+    if not key:
+        return f"Unknown media action '{action}'."
+    try:
+        import keyboard
+        keyboard.send(key)
+        return f"Sent media key: {action}."
+    except Exception as e:
+        return f"Couldn't send media key: {e}"
 
 
 def _to_ollama_messages(messages):

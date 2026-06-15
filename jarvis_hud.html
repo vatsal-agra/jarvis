@@ -118,6 +118,12 @@ body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14p
   backdrop-filter:blur(6px);box-shadow:0 6px 24px rgba(0,0,0,.45);transition:border-color .3s,box-shadow .3s}
 .cmdbar input:focus{border-color:var(--accent);box-shadow:0 0 22px var(--accent-glow)}
 .cmdbar input::placeholder{color:var(--ink-dim)}
+/* reminders countdown stack */
+.reminders{position:fixed;left:22px;bottom:120px;z-index:24;display:flex;flex-direction:column;gap:7px;max-width:300px}
+.rem{display:flex;align-items:center;gap:9px;background:rgba(8,16,28,.82);border:1px solid var(--line);
+  border-radius:10px;padding:7px 12px;font-size:11px;letter-spacing:.5px;backdrop-filter:blur(6px);animation:rise .35s ease both}
+.rem .rt{color:var(--amber);font-variant-numeric:tabular-nums;text-shadow:0 0 8px rgba(255,176,32,.4)}
+.rem .rx{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* boot sequence */
 #boot{position:fixed;inset:0;z-index:60;background:radial-gradient(circle at 50% 50%,#06121f,#02050a 70%);
@@ -139,6 +145,7 @@ body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14p
 <div class="bg-grid"></div><div class="bg-scan"></div><div class="vignette"></div>
 <div class="toasts" id="toasts"></div>
 <div class="planbar" id="planbar"></div>
+<div class="reminders" id="reminders"></div>
 <div class="cmdbar"><input id="cmd" placeholder="⌨  type a command for Jarvis…  (Enter to send)" autocomplete="off" spellcheck="false"></div>
 
 <div id="boot">
@@ -213,7 +220,9 @@ const PAL={
 const ICONS={web_search:'🔎',open_url:'🌐',browser_navigate:'🧭',browser_snapshot:'📸',
   browser_click:'🖱️',browser_type:'⌨️',browser_key:'⏎',open_app:'🪟',run_shell_command:'⚙️',
   look_at_page:'👁️',look_at_screen:'👁️',click_by_vision:'👁️',remember:'🧠',recall:'🧠',
-  get_weather:'🌦️',set_reminder:'⏰',read_clipboard:'📋',ask_file:'📄',default:'▸'};
+  get_weather:'🌦️',set_reminder:'⏰',read_clipboard:'📋',ask_file:'📄',calculate:'🧮',get_news:'📰',
+  daily_briefing:'🌅',set_plan:'📋',complete_step:'✅',browser_scroll:'📜',browser_tab:'🗂️',
+  write_file:'💾',convert_currency:'💱',media_control:'🎵',default:'▸'};
 
 let STATE='standby';
 let targetLevel=0.05, level=0.05, lastLevelAt=0;
@@ -249,6 +258,13 @@ function toast(text,lvl){const t=document.createElement('div');t.className='toas
 function pushLevel(v){targetLevel=Math.max(0,Math.min(1,v));lastLevelAt=performance.now();}
 function setBar(id,pct){const e=document.getElementById(id);if(!e)return;e.style.width=Math.max(0,Math.min(100,pct))+'%';
   const bar=e.parentElement;bar.classList.toggle('warn',pct>=70&&pct<90);bar.classList.toggle('full',pct>=90);}
+let REMINDERS=[];
+function renderReminders(){const box=$('#reminders');const now=Date.now()/1000;
+  const live=REMINDERS.filter(r=>r.at>now);
+  box.innerHTML=live.map(r=>{let s=Math.max(0,Math.round(r.at-now));const mm=String(Math.floor(s/60)).padStart(2,'0');
+    const ss=String(s%60).padStart(2,'0');
+    return `<div class="rem"><span class="rt">⏰ ${mm}:${ss}</span><span class="rx">${r.text}</span></div>`;}).join('');}
+setInterval(renderReminders,1000);
 function setPlan(steps,done){const bar=$('#planbar');
   if(!steps||!steps.length){bar.classList.remove('show');bar.innerHTML='';return;}
   bar.classList.add('show');
@@ -279,6 +295,7 @@ function dispatch(m){switch(m.kind){
     if(m.recalled){const b=$('#s-mem');b.style.textShadow='0 0 14px var(--accent-glow)';setTimeout(()=>b.style.textShadow='',900);}break;}
   case'vitals':setVitals(m);break;
   case'plan':setPlan(m.steps,m.done||0);break;
+  case'reminders':REMINDERS=m.items||[];renderReminders();break;
   case'toast':toast(m.text,m.level);break;
   case'online':{const d=$('#conn-dot');d.classList.toggle('off',!m.up);$('#conn').textContent=m.up?'ONLINE':'OFFLINE';break;}
 }}
@@ -433,6 +450,7 @@ window.JARVIS={dispatch,pushLevel,
    [2100,()=>dispatch({kind:'brain',provider:'gemini',model:'gemini-2.5-flash',key:2})],
    [2200,()=>{dispatch({kind:'memory',count:14,recalled:2});dispatch({kind:'toast',text:'🧠 recalled 2 memories',level:'info'});}],
    [2350,()=>dispatch({kind:'plan',steps:['Research AI news','Open LinkedIn','Draft post','Publish','Verify'],done:0})],
+   [2400,()=>dispatch({kind:'reminders',items:[{text:'Stand-up meeting',at:Date.now()/1000+185},{text:'Call the bank',at:Date.now()/1000+932}]})],
    [2300,()=>dispatch({kind:'quota',usage:[{key:1,model:'gemini-2.5-flash',used:20,limit:20},{key:2,model:'gemini-2.5-flash',used:7,limit:20},{key:3,model:'gemini-2.5-flash',used:2,limit:20}]})],
    [2600,()=>{dispatch({kind:'state',state:'acting',sub:'searching the web'});dispatch({kind:'tool',name:'web_search',summary:'AI news this week'});}],
    [3300,()=>{dispatch({kind:'tool',name:'web_search',status:'ok',detail:'12 results'});dispatch({kind:'plan',steps:['Research AI news','Open LinkedIn','Draft post','Publish','Verify'],done:1});}],

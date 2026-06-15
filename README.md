@@ -61,6 +61,10 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
   at a set time each day.
 - **News** (free, keyless via Google News RSS) and a **safe calculator** (local,
   instant, no quota).
+- **More tools** — page **scrolling** to reveal off-screen content, **multi-tab**
+  browsing, **file writing** (save notes/drafts/`.docx`), live **currency
+  conversion**, and **media controls** (play/pause/next/volume). Pending
+  reminders show as **live countdowns** on the HUD.
 - **Interrupt anytime** — press **ESC** to stop the current task mid-action.
 - **Live HUD** — a cinematic web dashboard (zero extra dependencies, served from
   Python over Server-Sent Events) that visualises the assistant in real time:
