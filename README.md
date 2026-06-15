@@ -5,6 +5,13 @@ wake word **"Jarvis"**, understands natural-language commands with an LLM, and
 acts on them — opening apps, searching the web, and driving websites end-to-end
 (posting, filling forms, multi-step tasks) through a real browser.
 
+![Jarvis HUD](docs/hud.png)
+
+> The **live HUD** above opens automatically in your browser when Jarvis starts.
+> It streams everything in real time — what you said, which brain/key is active,
+> every tool call as it runs, the Gemini daily-quota meter, and the reactor core
+> that shifts colour with Jarvis's state (listening · thinking · acting · speaking).
+
 ## Features
 
 - **Voice in/out** — speech recognition (Google STT) + neural TTS (edge-tts).
@@ -17,6 +24,11 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 - **Native app & system control** — via the Windows accessibility API
   (pywinauto) and shell commands, not pixel clicking.
 - **Interrupt anytime** — press **ESC** to stop the current task mid-action.
+- **Live HUD** — a cinematic web dashboard (zero extra dependencies, served from
+  Python over Server-Sent Events) that visualises the assistant in real time:
+  reactor core, transcript, streaming action feed, active brain/key, and a
+  Gemini daily-quota meter. Opens automatically on startup; set `JARVIS_HUD_PORT`
+  to change the port (default `8765`).
 
 ## Setup
 

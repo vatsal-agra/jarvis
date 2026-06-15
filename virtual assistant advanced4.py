@@ -101,6 +101,141 @@ import wikipedia
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  HUD  ─  live web control center
+#  A tiny stdlib HTTP server streams the assistant's state (listening,
+#  thinking, which brain/key, every tool call, the reply, Gemini quota) to a
+#  browser dashboard (jarvis_hud.html) over Server-Sent Events. Purely
+#  observational — if anything here fails, the assistant runs exactly as before.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+import http.server
+import queue as _queue
+import socketserver
+
+_HUD_PORT          = int(os.environ.get("JARVIS_HUD_PORT", "8765"))
+_HUD_DIR           = os.path.dirname(os.path.abspath(__file__))
+_HUD_CLIENTS       = []                 # one queue.Queue per connected browser
+_HUD_LOCK          = threading.Lock()
+_HUD_LAST          = {}                 # last value of replayable events (for late joiners)
+_GEMINI_USAGE      = {}                 # (key_index, model) -> requests made this session
+
+
+def _hud_emit(kind: str, **data) -> None:
+    """Broadcast one event to every connected HUD browser. Never raises."""
+    try:
+        data["kind"] = kind
+        if kind in ("state", "brain", "quota", "online"):
+            _HUD_LAST[kind] = data          # remember so a fresh page isn't blank
+        msg = json.dumps(data)
+        with _HUD_LOCK:
+            for q in list(_HUD_CLIENTS):
+                try:
+                    q.put_nowait(msg)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _hud_quota() -> None:
+    """Emit the per-key/per-model request meter (session counts; 429 marks a key full)."""
+    rows = []
+    for (idx, model), used in sorted(_GEMINI_USAGE.items()):
+        rows.append({"key": idx + 1, "model": model, "used": min(used, 20), "limit": 20})
+    if rows:
+        _hud_emit("quota", usage=rows)
+
+
+def _tool_summary(name: str, args: dict) -> str:
+    """One-line human summary of a tool call for the action feed."""
+    a = args or {}
+    for k in ("query", "url", "text", "name", "command", "element", "content", "key"):
+        if a.get(k):
+            v = str(a[k]).replace("\n", " ")
+            if k in ("element", "content"):
+                v = f"[{a.get('element','')}] {str(a.get('content',''))}".strip()
+            return v[:60]
+    return ", ".join(f"{k}={v}" for k, v in list(a.items())[:2])[:60]
+
+
+def _tool_outcome(result) -> tuple:
+    """Map a tool result string to (status, short-detail) for the HUD."""
+    s = str(result)
+    low = s.lower()
+    bad = any(t in low for t in ("error", "could not", "no element", "couldn't", "unavailable", "failed"))
+    first = s.strip().splitlines()[0] if s.strip() else ""
+    return ("err" if bad else "ok"), first[:54]
+
+
+class _HudHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            try:
+                with open(os.path.join(_HUD_DIR, "jarvis_hud.html"), "rb") as f:
+                    body = f.read()
+            except Exception:
+                body = b"<h1 style='color:#fff;background:#000'>jarvis_hud.html not found</h1>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if self.path == "/events":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            q = _queue.Queue(maxsize=256)
+            with _HUD_LOCK:
+                _HUD_CLIENTS.append(q)
+            try:
+                self.wfile.write(b": connected\n\n")
+                for k in ("online", "brain", "quota", "state"):   # replay current state
+                    if k in _HUD_LAST:
+                        self.wfile.write(f"data: {json.dumps(_HUD_LAST[k])}\n\n".encode())
+                self.wfile.flush()
+                while True:
+                    try:
+                        msg = q.get(timeout=15)
+                    except _queue.Empty:
+                        self.wfile.write(b": ping\n\n")    # keep-alive heartbeat
+                        self.wfile.flush()
+                        continue
+                    self.wfile.write(f"data: {msg}\n\n".encode())
+                    self.wfile.flush()
+            except Exception:
+                pass
+            finally:
+                with _HUD_LOCK:
+                    try:
+                        _HUD_CLIENTS.remove(q)
+                    except ValueError:
+                        pass
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+
+def _start_hud() -> str:
+    """Launch the HUD server in a background thread. Returns its URL, or '' on failure."""
+    try:
+        socketserver.ThreadingTCPServer.allow_reuse_address = True
+        srv = socketserver.ThreadingTCPServer(("127.0.0.1", _HUD_PORT), _HudHandler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return f"http://127.0.0.1:{_HUD_PORT}"
+    except Exception:
+        return ""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  TTS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _clean_for_speech(text: str) -> str:
@@ -130,6 +265,8 @@ try:
     def speak(text: str) -> None:
         text = _clean_for_speech(str(text))
         print(f"\n🤖 Jarvis: {text}\n")
+        _hud_emit("jarvis", text=text)
+        _hud_emit("state", state="speaking", sub="responding")
         try:
             import concurrent.futures
             # Run in a fresh thread so asyncio.run() never conflicts
@@ -147,6 +284,7 @@ try:
             os.unlink(fname)
         except Exception as e:
             print(f"[TTS Error] {e}")
+        _hud_emit("state", state="standby", sub="ready")
 
 except ImportError:
     import pyttsx3
@@ -159,8 +297,11 @@ except ImportError:
     def speak(text: str) -> None:
         text = _clean_for_speech(str(text))
         print(f"\n🤖 Jarvis: {text}\n")
+        _hud_emit("jarvis", text=text)
+        _hud_emit("state", state="speaking", sub="responding")
         _engine.say(text)
         _engine.runAndWait()
+        _hud_emit("state", state="standby", sub="ready")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -214,6 +355,7 @@ def takeCommand() -> str:
     )
 
     print("🎙  Listening...")
+    _hud_emit("state", state="listening", sub="listening for “Jarvis…”")
 
     pre_roll       = []        # ring buffer before speech starts
     recording      = []        # accumulated speech frames
@@ -244,6 +386,7 @@ def takeCommand() -> str:
                     recording      = list(pre_roll)   # include pre-roll
                     silence_count  = 0
                     print("   Recording...")
+                    _hud_emit("state", state="listening", sub="hearing you…")
 
                 total_waited += 1
                 if total_waited >= WAIT_TIMEOUT:
@@ -1441,6 +1584,8 @@ def _gemini_request(messages, tools, temperature) -> dict:
                 if r.status_code == 200:
                     _gemini_key_idx = idx          # remember the working key
                     _gemini_last_model = model     # …and the model that served it
+                    _GEMINI_USAGE[(idx, model)] = _GEMINI_USAGE.get((idx, model), 0) + 1
+                    _hud_quota()
                     return r.json()["choices"][0]["message"]
                 if r.status_code == 503:
                     time.sleep(2)                  # model busy — retry same key
@@ -1448,6 +1593,8 @@ def _gemini_request(messages, tools, temperature) -> dict:
                     continue
                 if r.status_code == 429:
                     last_err = f"429 daily-limit (key {idx + 1}, {model})"
+                    _GEMINI_USAGE[(idx, model)] = 20   # tapped out for the day → bar goes full
+                    _hud_quota()
                     break                          # key tapped out — try the next key
                 last_err = f"HTTP {r.status_code}: {r.text[:120]}"
                 break                              # 401/403/400 — try the next key
@@ -1505,9 +1652,12 @@ def brain_chat(messages, tools, temperature):
     falls back to local Ollama."""
     try:
         msg = _gemini_request(messages, tools, temperature)
+        _hud_emit("brain", provider="gemini", model=_gemini_last_model, key=_gemini_key_idx + 1)
         return _sanitize_assistant(msg), f"Gemini ({_gemini_last_model}, key {_gemini_key_idx + 1})"
     except Exception as e:
         print(f"   ⚠ Gemini unavailable ({e}) → using local Ollama")
+        _hud_emit("toast", text="Gemini unavailable — switching to local Ollama", level="warn")
+        _hud_emit("brain", provider="ollama", model=OLLAMA_MODEL)
         msg = _ollama_request(messages, tools, temperature)
         return _sanitize_assistant(msg), f"Ollama ({OLLAMA_MODEL})"
 
@@ -1518,12 +1668,14 @@ def process_command(user_input: str, history: list) -> tuple[str, list]:
 
     final = "Done."
     label_shown = False
+    _hud_emit("state", state="thinking", sub="reasoning")
     for _ in range(10):  # max 10 tool rounds per command
         if _ABORT.is_set():
             history.append({"role": "assistant", "content": "Okay, stopped."})
             return "__ABORTED__", history
 
         try:
+            _hud_emit("state", state="thinking", sub="reasoning")
             assistant, label = brain_chat(messages, TOOLS, 0.15)
         except Exception as e:
             err = f"AI error: {e}"
@@ -1557,7 +1709,11 @@ def process_command(user_input: str, history: list) -> tuple[str, list]:
                 args = json.loads(tc["function"].get("arguments") or "{}")
             except Exception:
                 args = {}
+            _hud_emit("state", state="acting", sub=name.replace("_", " "))
+            _hud_emit("tool", name=name, summary=_tool_summary(name, args), status="run")
             result = execute_tool(name, args)
+            _status, _detail = _tool_outcome(result)
+            _hud_emit("tool", name=name, status=_status, detail=_detail)
             preview = str(result)
             if len(preview) > 900:
                 preview = preview[:900] + " …(truncated)"
@@ -1634,17 +1790,30 @@ def wish() -> None:
 #  MAIN LOOP
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if __name__ == "__main__":
+    # ── Launch the live HUD (web control center) ──────────────────────────────
+    _hud_url = _start_hud()
+    if _hud_url:
+        try:
+            webbrowser.open(_hud_url)
+        except Exception:
+            pass
+    _hud_emit("state", state="standby", sub="booting")
+
     print("=" * 62)
     print("  JARVIS  —  AI Assistant")
     print(f"  Brain  : Gemini {' → '.join(GEMINI_MODELS)}  ({len(GEMINI_KEYS)} keys)  +  Ollama fallback")
     print("  Web    : Playwright Chromium  (DOM-based, reliable)")
     print("  Search : DuckDuckGo  (real-time, free)")
     print("  Apps   : pywinauto   (Windows accessibility API)")
+    if _hud_url:
+        print(f"  HUD    : {_hud_url}   (live control center — opening in browser)")
     print("  Say 'Jarvis stop' or 'Jarvis goodbye' to exit.")
     print("=" * 62)
 
     print("Checking AI brain...")
     if _gemini_available():
+        _hud_emit("online", up=True)
+        _hud_emit("brain", provider="gemini", model=GEMINI_MODEL, key=1)
         print(f"Brain ready: Gemini {GEMINI_MODEL} ({len(GEMINI_KEYS)} key(s)). "
               "Local Ollama armed as fallback.\n")
         # Start the Ollama server in the background so fallback is instant if
@@ -1655,6 +1824,8 @@ if __name__ == "__main__":
             pass
     else:
         print("Gemini not reachable — using local Ollama brain.")
+        _hud_emit("online", up=False)
+        _hud_emit("brain", provider="ollama", model=OLLAMA_MODEL)
         if not ensure_ollama_running():
             speak("Could not reach any AI brain. Check your internet, or start Ollama.")
             exit(1)
@@ -1695,6 +1866,8 @@ if __name__ == "__main__":
         if any(p in q for p in ["jarvis stop", "jarvis goodbye", "jarvis bye",
                                   "jarvis goodnight", "jarvis exit", "jarvis quit"]):
             speak("Goodbye!")
+            _hud_emit("toast", text="Jarvis signing off", level="info")
+            _hud_emit("state", state="standby", sub="offline")
             try:
                 if _pw_instance:
                     _pw_instance.stop()
@@ -1718,16 +1891,20 @@ if __name__ == "__main__":
             continue
 
         print(f"\n📨 Sending to AI: {clean}")
+        _hud_emit("user", text=clean)
         _ABORT.clear()        # fresh task — ignore any stale stop signal
         response, conversation_history = process_command(clean, conversation_history)
 
         if response == "__ABORTED__":
             _ABORT.clear()    # consume the stop; ready for the next command
             print("⏹  Stopped.")
+            _hud_emit("toast", text="Task stopped", level="warn")
+            _hud_emit("state", state="standby", sub="stopped")
             speak("Okay, stopped. What should I do instead?")
             time.sleep(0.3)
             continue
 
+        _hud_emit("task")     # one task completed → bump the counter
         speak(response)
 
         time.sleep(0.3)
