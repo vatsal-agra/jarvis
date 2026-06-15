@@ -2,6 +2,7 @@
 jarvis_keys.txt
 .env
 .env.*
+!.env.example
 *.key
 secrets*.py
 
