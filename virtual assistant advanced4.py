@@ -1115,6 +1115,89 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "click_by_vision",
+            "description": (
+                "Click something on the current browser page by DESCRIBING it visually, when "
+                "it is NOT in the numbered element list (e.g. an image, a canvas control, an "
+                "icon with no label, a map pin). Jarvis looks at the page and clicks where the "
+                "thing is. Prefer browser_click with a number when the element IS listed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string",
+                        "description": "What to click, described visually, e.g. 'the blue circular play button in the centre of the video'."}
+                },
+                "required": ["description"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather for a place (free, no key). Use for weather questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City or place name, e.g. 'Vellore' or 'Tokyo'."}
+                },
+                "required": ["location"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reminder",
+            "description": (
+                "Set a reminder/timer. Jarvis will speak the reminder out loud when it's due. "
+                "Convert the user's phrasing into delay_seconds (e.g. 'in 10 minutes' → 600, "
+                "'in 2 hours' → 7200)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "What to remind the user about."},
+                    "delay_seconds": {"type": "integer", "description": "Seconds from now until the reminder fires."}
+                },
+                "required": ["text", "delay_seconds"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_clipboard",
+            "description": (
+                "Read whatever text the user currently has copied to their clipboard. Use when "
+                "they say things like 'summarise what I copied', 'translate this', 'what does "
+                "this mean' referring to copied text."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_file",
+            "description": (
+                "Read a local document (.txt .md .csv .pdf .docx or code) and answer a question "
+                "about its contents. Use when the user asks about a file by path."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Full path to the file."},
+                    "question": {"type": "string", "description": "What the user wants to know about it."}
+                },
+                "required": ["path", "question"],
+            },
+        },
+    },
 ]
 
 
@@ -1494,6 +1577,41 @@ def execute_tool(name: str, args: dict) -> str:
             return "I don't have anything in memory about that yet."
         return "From memory:\n" + "\n".join(f"• {t}" for t, _ in hits)
 
+    # ── click_by_vision ── (Set-of-Marks: model picks a marked element to click) ─
+    elif name == "click_by_vision":
+        desc = args.get("description", "")
+        try:
+            _hud_emit("toast", text="👁 locating by vision…", level="info")
+            return _vision_click(_get_page(), desc)
+        except Exception as e:
+            return f"Vision-click error: {e}"
+
+    # ── get_weather ─────────────────────────────────────────────────────────────
+    elif name == "get_weather":
+        return _get_weather(args.get("location", ""))
+
+    # ── set_reminder ────────────────────────────────────────────────────────────
+    elif name == "set_reminder":
+        text = (args.get("text") or "").strip() or "your reminder"
+        try:
+            delay = int(args.get("delay_seconds", 0))
+        except Exception:
+            delay = 0
+        if delay <= 0:
+            return "I need a valid time for the reminder."
+        return _set_reminder(text, delay)
+
+    # ── read_clipboard ──────────────────────────────────────────────────────────
+    elif name == "read_clipboard":
+        clip = _read_clipboard()
+        if not clip.strip():
+            return "The clipboard is empty (or contains no text)."
+        return f"Clipboard contents:\n{clip[:4000]}"
+
+    # ── ask_file ──────────────────────────────────────────────────────────────--
+    elif name == "ask_file":
+        return _ask_file(args.get("path", ""), args.get("question", "Summarise this file."))
+
     return f"Unknown tool: {name}"
 
 
@@ -1519,8 +1637,13 @@ Control an open Windows app             → windows_control
 Facts / encyclopedia                    → wikipedia_search
 See / read the user's screen            → look_at_screen
 Visually verify a web action worked     → look_at_page
+Click an unlabelled/visual element      → click_by_vision
 Save a lasting fact about the user      → remember
 Look up older context about the user    → recall
+Weather for a place                     → get_weather
+Set a reminder / timer                  → set_reminder
+Use text the user has copied            → read_clipboard
+Answer questions about a local file     → ask_file
 
 ━━ YOU HAVE EYES (vision) ━━
 You can SEE. After an important web action whose success isn't obvious from the element
@@ -1777,6 +1900,54 @@ def _grab_screen_b64(max_w: int = 1280):
     return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
 
 
+def _vision_click(page, description: str) -> str:
+    """Click an element by VISUAL description using Set-of-Marks prompting: every
+    interactive element is tagged + drawn with its number on a screenshot, then
+    Gemini picks WHICH number matches the description (reliable — it chooses among
+    labelled candidates instead of guessing raw pixels). We click that element by
+    its data-jarvis-id, so the click itself is exact. Great for icon buttons,
+    images and controls whose text label is missing or unhelpful."""
+    from PIL import Image, ImageDraw
+    _index_interactive(page)   # tag every visible interactive element with data-jarvis-id
+    rects = page.evaluate(
+        "() => { const d = window.devicePixelRatio || 1;"
+        " return [...document.querySelectorAll('[data-jarvis-id]')].map(e=>{"
+        "  const r=e.getBoundingClientRect();"
+        "  return {id:+e.getAttribute('data-jarvis-id'),"
+        "          x:(r.x+r.width/2)*d, y:(r.y+r.height/2)*d,"
+        "          on:(r.width>1&&r.height>1&&r.bottom>0&&r.top<innerHeight)};})"
+        " .filter(o=>o.on); }"
+    )
+    if not rects:
+        return "Nothing visible to click on this page."
+    png = page.screenshot(type="png")
+    img = Image.open(io.BytesIO(png)).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    for o in rects:                       # draw numbered markers (Set-of-Marks)
+        x, y = o["x"], o["y"]
+        draw.ellipse([x - 14, y - 11, x + 14, y + 11], fill=(255, 40, 90))
+        draw.text((x - 4 * len(str(o["id"])), y - 6), str(o["id"]), fill=(255, 255, 255))
+    buf = io.BytesIO(); img.save(buf, "PNG")
+    prompt = (
+        "Each clickable element on this page is marked with a pink numbered badge. "
+        f"Which badge number is on: \"{description}\"? "
+        "Reply with ONLY JSON: {\"id\": <number>, \"found\": true} or {\"found\": false} if none match."
+    )
+    ans = _gemini_vision(prompt, base64.b64encode(buf.getvalue()).decode(), "image/png")
+    mt = re.search(r"\{.*\}", ans, re.S)
+    data = json.loads(mt.group(0)) if mt else {}
+    if not data.get("found") or "id" not in data:
+        return f"I looked but couldn't visually identify '{description}'. Try browser_snapshot for the numbered list."
+    idx = int(data["id"])
+    loc = page.locator(f"[data-jarvis-id='{idx}']")
+    if loc.count() == 0:
+        return f"Vision picked element [{idx}] but it's no longer on the page. Re-snapshot and retry."
+    loc.first.click(timeout=5000)
+    _settle(page)
+    snap = execute_tool("browser_snapshot", {})
+    return f"Saw and clicked '{description}' (element [{idx}]). Page now:\n\n{snap}"
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  LONG-TERM MEMORY  ─  free Gemini embeddings + local vector store
 #  Jarvis embeds and stores durable facts; before each command the most
@@ -1866,6 +2037,245 @@ def _mem_search(query: str, k: int = 4, threshold: float = 0.30):
     scored = [(m["text"], _cosine(qv, m["vec"])) for m in _MEM if m.get("vec")]
     scored.sort(key=lambda x: x[1], reverse=True)
     return [(t, s) for t, s in scored[:k] if s >= threshold]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  PASSIVE LEARNING  ─  auto-extract durable facts after each exchange
+#  Uses the LOCAL Ollama model so it costs ZERO Gemini quota, then stores
+#  any facts via the free embeddings memory above. Jarvis learns silently.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_LEARN_PROMPT = (
+    "You extract durable, long-term facts about the USER from a conversation turn. "
+    "Return ONLY a JSON array of short standalone sentences (max 3) capturing lasting "
+    "facts worth remembering: preferences, identity, accounts, location, recurring needs, "
+    "how they like things done. IGNORE one-off task details, questions, and chit-chat. "
+    "If nothing is durable, return []. No prose, JSON array only.\n\n"
+    "USER: {user}\nASSISTANT: {asst}"
+)
+
+
+def _extract_facts(user_text: str, asst_text: str):
+    """Ask the local model for durable facts. Returns a list[str] (possibly empty)."""
+    prompt = _LEARN_PROMPT.format(user=user_text[:600], asst=asst_text[:600])
+    raw = ""
+    try:
+        resp = ollama.chat(model=OLLAMA_MODEL,
+                           messages=[{"role": "user", "content": prompt}],
+                           options={"temperature": 0.1})
+        raw = (resp.message.content or "").strip()
+    except Exception:
+        return []
+    m = re.search(r"\[.*\]", raw, re.S)        # pull the JSON array out of any wrapper
+    if not m:
+        return []
+    try:
+        facts = json.loads(m.group(0))
+    except Exception:
+        return []
+    return [str(f).strip() for f in facts if isinstance(f, (str,)) and str(f).strip()][:3]
+
+
+def _learn_async(user_text: str, asst_text: str) -> None:
+    """Background passive-learning pass — never blocks the main loop."""
+    def _run():
+        try:
+            facts = _extract_facts(user_text, asst_text)
+            n = 0
+            for f in facts:
+                if _mem_add(f):
+                    n += 1
+                    print(f"   🧠 learned: {f}")
+            if n:
+                _hud_emit("toast", text=f"🧠 learned {n} new fact(s)", level="ok")
+                _hud_emit("memory", count=len(_MEM))
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  SYSTEM VITALS  ─  live CPU / RAM / GPU / battery telemetry → HUD
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _gpu_stats():
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=2,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        u, mu, mt, t = [x.strip() for x in out.stdout.strip().split("\n")[0].split(",")]
+        return {"util": float(u), "mem_used": float(mu), "mem_total": float(mt), "temp": float(t)}
+    except Exception:
+        return None
+
+
+def _vitals() -> dict:
+    import psutil
+    v = {"cpu": round(psutil.cpu_percent()), "ram": round(psutil.virtual_memory().percent)}
+    try:
+        b = psutil.sensors_battery()
+        if b is not None:
+            v["batt"] = round(b.percent)
+            v["plugged"] = bool(b.power_plugged)
+    except Exception:
+        pass
+    g = _gpu_stats()
+    if g:
+        v["gpu"] = round(g["util"])
+        v["gpu_mem"] = round(g["mem_used"] / g["mem_total"] * 100) if g["mem_total"] else 0
+        v["gpu_temp"] = round(g["temp"])
+    return v
+
+
+def _vitals_loop() -> None:
+    try:
+        import psutil
+        psutil.cpu_percent()      # prime the first reading
+    except Exception:
+        return
+    while True:
+        try:
+            _hud_emit("vitals", **_vitals())
+        except Exception:
+            pass
+        time.sleep(2)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  WEATHER  ─  free, no API key (Open-Meteo)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_WMO = {0:"clear sky",1:"mainly clear",2:"partly cloudy",3:"overcast",45:"fog",48:"rime fog",
+    51:"light drizzle",53:"drizzle",55:"dense drizzle",61:"light rain",63:"rain",65:"heavy rain",
+    66:"freezing rain",71:"light snow",73:"snow",75:"heavy snow",77:"snow grains",80:"light showers",
+    81:"showers",82:"violent showers",85:"snow showers",86:"heavy snow showers",95:"thunderstorm",
+    96:"thunderstorm w/ hail",99:"severe thunderstorm"}
+
+
+def _get_weather(location: str) -> str:
+    try:
+        g = requests.get("https://geocoding-api.open-meteo.com/v1/search",
+                         params={"name": location, "count": 1}, timeout=10).json()
+        if not g.get("results"):
+            return f"Couldn't find a place called '{location}'."
+        r = g["results"][0]
+        w = requests.get("https://api.open-meteo.com/v1/forecast", params={
+            "latitude": r["latitude"], "longitude": r["longitude"],
+            "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m",
+            "timezone": "auto"}, timeout=10).json()
+        c = w["current"]
+        desc = _WMO.get(c.get("weather_code"), "unknown conditions")
+        place = ", ".join(x for x in (r.get("name"), r.get("country")) if x)
+        return (f"{place}: {c['temperature_2m']}°C and {desc}, feels like "
+                f"{c['apparent_temperature']}°C, humidity {c['relative_humidity_2m']}%, "
+                f"wind {c['wind_speed_10m']} km/h.")
+    except Exception as e:
+        return f"Weather error: {e}"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  REMINDERS / TIMERS  ─  a background scheduler that speaks when due
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_REM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_reminders.json")
+_REMINDERS = []      # [{"text":str, "at":epoch_float}]
+_REM_LOCK = threading.Lock()
+
+
+def _rem_load():
+    global _REMINDERS
+    try:
+        with open(_REM_PATH, encoding="utf-8") as f:
+            _REMINDERS = json.load(f)
+    except Exception:
+        _REMINDERS = []
+
+
+def _rem_save():
+    try:
+        with open(_REM_PATH, "w", encoding="utf-8") as f:
+            json.dump(_REMINDERS, f)
+    except Exception:
+        pass
+
+
+def _set_reminder(text: str, delay_seconds: int) -> str:
+    when = time.time() + max(1, int(delay_seconds))
+    with _REM_LOCK:
+        _REMINDERS.append({"text": text, "at": when})
+        _rem_save()
+    mins = max(1, round(delay_seconds / 60))
+    _hud_emit("toast", text=f"⏰ reminder set ({mins} min)", level="ok")
+    return f"Reminder set. I'll remind you in about {mins} minute(s)."
+
+
+def _reminder_loop() -> None:
+    while True:
+        now = time.time()
+        due = []
+        with _REM_LOCK:
+            keep = []
+            for r in _REMINDERS:
+                (due if r["at"] <= now else keep).append(r)
+            if due:
+                _REMINDERS[:] = keep
+                _rem_save()
+        for r in due:
+            _hud_emit("toast", text=f"⏰ {r['text']}", level="warn")
+            try:
+                speak(f"Reminder: {r['text']}")
+            except Exception:
+                pass
+        time.sleep(3)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  CLIPBOARD + LOCAL FILE Q&A
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _read_clipboard() -> str:
+    try:
+        import pyperclip
+        return pyperclip.paste() or ""
+    except Exception:
+        try:
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
+                                 capture_output=True, text=True, timeout=5)
+            return out.stdout.strip()
+        except Exception:
+            return ""
+
+
+def _read_file_text(path: str, limit: int = 14000) -> str:
+    path = os.path.expanduser(path.strip().strip('"'))
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        from pypdf import PdfReader
+        txt = "\n".join((pg.extract_text() or "") for pg in PdfReader(path).pages)
+    elif ext == ".docx":
+        import docx
+        txt = "\n".join(p.text for p in docx.Document(path).paragraphs)
+    else:                                   # txt / md / csv / code / etc.
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            txt = f.read()
+    return txt[:limit]
+
+
+def _ask_file(path: str, question: str) -> str:
+    try:
+        text = _read_file_text(path)
+    except FileNotFoundError:
+        return f"I can't find the file: {path}"
+    except Exception as e:
+        return f"Couldn't read that file: {e}"
+    if not text.strip():
+        return "That file appears to be empty or unreadable (maybe a scanned PDF — try look_at_screen)."
+    messages = [
+        {"role": "system", "content": "Answer the user's question using ONLY the document below. Be concise and spoken-friendly. If the answer isn't in it, say so.\n\nDOCUMENT:\n" + text},
+        {"role": "user", "content": question},
+    ]
+    try:
+        return (_gemini_request(messages, None, 0.2).get("content") or "").strip()
+    except Exception as e:
+        return f"Couldn't analyse the file: {e}"
 
 
 def _to_ollama_messages(messages):
@@ -2085,6 +2495,10 @@ if __name__ == "__main__":
         print(f"Memory: {len(_MEM)} fact(s) loaded.")
     _hud_emit("memory", count=len(_MEM))
 
+    _rem_load()   # restore any pending reminders from a previous session
+    threading.Thread(target=_reminder_loop, daemon=True).start()   # fires reminders when due
+    threading.Thread(target=_vitals_loop, daemon=True).start()     # streams live system telemetry
+
     print("=" * 62)
     print("  JARVIS  —  AI Assistant")
     print(f"  Brain  : Gemini {' → '.join(GEMINI_MODELS)}  ({len(GEMINI_KEYS)} keys)  +  Ollama fallback")
@@ -2133,20 +2547,24 @@ if __name__ == "__main__":
     conversation_history: list = []
     WAKE_WORDS = ("jarvis ", "hey jarvis ", "ok jarvis ", "okay jarvis ")
 
+    awaiting_followup = False   # conversational mode: brief window after a reply
     while True:
         query = takeCommand()
         if not query or query == "none":
+            awaiting_followup = False        # silence → go back to requiring the wake word
             continue
 
         q = query.lower().strip()
 
-        # ── Wake word gate ────────────────────────────────────────────────────
-        # Ignore anything that doesn't contain "jarvis"
-        if "jarvis" not in q:
+        # ── Activation gate ───────────────────────────────────────────────────
+        # Normally needs the wake word. But right after Jarvis replies we open a
+        # short follow-up window where you can just keep talking, no "Jarvis".
+        followup = awaiting_followup and ("jarvis" not in q)
+        awaiting_followup = False             # this turn consumes the window
+
+        if "jarvis" not in q and not followup:
             print("   (no wake word — ignored)")
             continue
-
-        print("   ✅ Wake word detected")
 
         # ── Hard stop — no LLM round-trip ─────────────────────────────────────
         if any(p in q for p in ["jarvis stop", "jarvis goodbye", "jarvis bye",
@@ -2161,19 +2579,24 @@ if __name__ == "__main__":
                 pass
             break
 
-        # ── Strip wake word so LLM gets clean intent ───────────────────────────
-        clean = query.strip()
-        for w in WAKE_WORDS:
-            if clean.lower().startswith(w):
-                clean = clean[len(w):].strip()
-                break
+        if followup:
+            print("   ↪ follow-up (no wake word needed)")
+            clean = re.sub(r"(?i)\bjarvis\b[,\s]*", "", query.strip()).strip()
         else:
-            # "jarvis" appeared mid-sentence or with no space — strip it anyway
-            clean = re.sub(r"(?i)\bjarvis\b[,\s]*", "", clean).strip()
+            print("   ✅ Wake word detected")
+            # ── Strip wake word so the LLM gets clean intent ───────────────────
+            clean = query.strip()
+            for w in WAKE_WORDS:
+                if clean.lower().startswith(w):
+                    clean = clean[len(w):].strip()
+                    break
+            else:
+                clean = re.sub(r"(?i)\bjarvis\b[,\s]*", "", clean).strip()
 
         # Nothing left after stripping (e.g. user just said "Jarvis")
         if not clean:
             speak("Yes?")
+            awaiting_followup = True
             continue
 
         print(f"\n📨 Sending to AI: {clean}")
@@ -2187,10 +2610,13 @@ if __name__ == "__main__":
             _hud_emit("toast", text="Task stopped", level="warn")
             _hud_emit("state", state="standby", sub="stopped")
             speak("Okay, stopped. What should I do instead?")
+            awaiting_followup = True
             time.sleep(0.3)
             continue
 
         _hud_emit("task")     # one task completed → bump the counter
         speak(response)
+        _learn_async(clean, response)   # passively extract & remember durable facts
+        awaiting_followup = True         # open a follow-up window for a natural back-and-forth
 
         time.sleep(0.3)

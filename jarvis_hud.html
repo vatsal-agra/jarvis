@@ -159,6 +159,15 @@ body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14p
   <aside class="right panel">
     <h2>LIVE ACTIONS <span class="tag" id="a-count">0</span></h2>
     <div class="scroll" id="actions"><div class="empty">No actions yet.</div></div>
+    <div class="quota">
+      <h2 style="margin-bottom:8px">SYSTEM&nbsp;VITALS <span class="tag" id="v-extra">—</span></h2>
+      <div id="vitals">
+        <div class="qrow"><span class="ql">CPU</span><span class="qbar"><i id="v-cpu" style="width:0"></i></span><span class="qn" id="v-cpu-n">—</span></div>
+        <div class="qrow"><span class="ql">RAM</span><span class="qbar"><i id="v-ram" style="width:0"></i></span><span class="qn" id="v-ram-n">—</span></div>
+        <div class="qrow"><span class="ql">GPU</span><span class="qbar"><i id="v-gpu" style="width:0"></i></span><span class="qn" id="v-gpu-n">—</span></div>
+        <div class="qrow"><span class="ql">VRAM</span><span class="qbar"><i id="v-vram" style="width:0"></i></span><span class="qn" id="v-vram-n">—</span></div>
+      </div>
+    </div>
   </aside>
 
   <footer class="bottom">
@@ -184,7 +193,8 @@ const PAL={
 };
 const ICONS={web_search:'🔎',open_url:'🌐',browser_navigate:'🧭',browser_snapshot:'📸',
   browser_click:'🖱️',browser_type:'⌨️',browser_key:'⏎',open_app:'🪟',run_shell_command:'⚙️',
-  look_at_page:'👁️',look_at_screen:'👁️',remember:'🧠',recall:'🧠',default:'▸'};
+  look_at_page:'👁️',look_at_screen:'👁️',click_by_vision:'👁️',remember:'🧠',recall:'🧠',
+  get_weather:'🌦️',set_reminder:'⏰',read_clipboard:'📋',ask_file:'📄',default:'▸'};
 
 let STATE='standby';
 let targetLevel=0.05, level=0.05, lastLevelAt=0;
@@ -218,6 +228,17 @@ function setQuota(rows){const box=$('#quota');if(!rows||!rows.length)return;box.
 function toast(text,lvl){const t=document.createElement('div');t.className='toast '+(lvl||'');t.textContent=text;
   $('#toasts').appendChild(t);setTimeout(()=>{t.style.opacity=0;setTimeout(()=>t.remove(),400)},3200);}
 function pushLevel(v){targetLevel=Math.max(0,Math.min(1,v));lastLevelAt=performance.now();}
+function setBar(id,pct){const e=document.getElementById(id);if(!e)return;e.style.width=Math.max(0,Math.min(100,pct))+'%';
+  const bar=e.parentElement;bar.classList.toggle('warn',pct>=70&&pct<90);bar.classList.toggle('full',pct>=90);}
+function setVitals(v){
+  if(typeof v.cpu==='number'){setBar('v-cpu',v.cpu);$('#v-cpu-n').textContent=v.cpu+'%';}
+  if(typeof v.ram==='number'){setBar('v-ram',v.ram);$('#v-ram-n').textContent=v.ram+'%';}
+  if(typeof v.gpu==='number'){setBar('v-gpu',v.gpu);$('#v-gpu-n').textContent=v.gpu+'%';}
+  if(typeof v.gpu_mem==='number'){setBar('v-vram',v.gpu_mem);$('#v-vram-n').textContent=v.gpu_mem+'%';}
+  const x=[];if(typeof v.gpu_temp==='number')x.push(v.gpu_temp+'°C');
+  if(typeof v.batt==='number')x.push('🔋'+v.batt+'%'+(v.plugged?'⚡':''));
+  if(x.length)$('#v-extra').textContent=x.join('  ');
+}
 
 function dispatch(m){switch(m.kind){
   case'state':setState(m.state,m.sub);break;
@@ -232,6 +253,7 @@ function dispatch(m){switch(m.kind){
   case'task':tasks++;$('#s-tasks').textContent=tasks;break;
   case'memory':{if(typeof m.count==='number')$('#s-mem').textContent=m.count;
     if(m.recalled){const b=$('#s-mem');b.style.textShadow='0 0 14px var(--accent-glow)';setTimeout(()=>b.style.textShadow='',900);}break;}
+  case'vitals':setVitals(m);break;
   case'toast':toast(m.text,m.level);break;
   case'online':{const d=$('#conn-dot');d.classList.toggle('off',!m.up);$('#conn').textContent=m.up?'ONLINE':'OFFLINE';break;}
 }}
@@ -357,6 +379,12 @@ function connect(){try{const es=new EventSource('/events');
 
 resize();setState('standby','ready');requestAnimationFrame(frame);
 boot(()=>connect());
+
+/* simulated vitals when no backend is connected (keeps the panel alive offline) */
+let vitalsLive=false;
+setInterval(()=>{if(vitalsLive)return;const r=()=>Math.round(20+Math.random()*60);
+  setVitals({cpu:r(),ram:r(),gpu:r(),gpu_mem:r(),gpu_temp:55+Math.round(Math.random()*20),batt:87,plugged:true});},2000);
+const _origDispatch=dispatch;dispatch=function(m){if(m.kind==='vitals')vitalsLive=true;return _origDispatch(m);};
 
 /* ── scripted demo (offline preview + verification) ──────────────── */
 window.JARVIS={dispatch,pushLevel,

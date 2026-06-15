@@ -35,6 +35,21 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
   verification** for the steps the DOM can't confirm.
 - **Native app & system control** — via the Windows accessibility API
   (pywinauto) and shell commands, not pixel clicking.
+- **Vision-grounded clicking** — for controls the DOM can't name (icons, images,
+  canvas), Jarvis screenshots the page, overlays numbered markers on every
+  element (Set-of-Marks), and asks Gemini which one matches your description —
+  then clicks it precisely. Operates UIs that text-matching can't.
+- **Passive learning** — after each exchange a *local* Ollama pass quietly
+  extracts durable facts about you and stores them in memory (zero Gemini quota).
+- **Conversational follow-ups** — after a reply, Jarvis listens briefly so you
+  can keep talking without saying "Jarvis" again.
+- **Reminders & timers** — "remind me in 20 minutes to…"; a scheduler speaks it
+  aloud when due (and survives restarts).
+- **Weather** — current conditions for any place, free and keyless (Open-Meteo).
+- **Clipboard awareness** — "summarise / translate what I copied".
+- **Local document Q&A** — ask questions about a `.txt/.md/.csv/.pdf/.docx` file.
+- **Live system telemetry** — CPU / RAM / GPU / VRAM / temp / battery stream to
+  the HUD in real time.
 - **Interrupt anytime** — press **ESC** to stop the current task mid-action.
 - **Live HUD** — a cinematic web dashboard (zero extra dependencies, served from
   Python over Server-Sent Events) that visualises the assistant in real time:
@@ -54,7 +69,8 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 ```bash
 pip install SpeechRecognition pyaudio edge-tts pygame wikipedia \
             deep-translator pyshorteners ollama requests ddgs \
-            playwright pywinauto keyboard
+            playwright pywinauto keyboard \
+            psutil pyperclip pypdf python-docx Pillow
 python -m playwright install chromium
 ```
 
