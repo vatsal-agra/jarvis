@@ -165,6 +165,7 @@ body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14p
     <div class="hints">Say <kbd>“Jarvis …”</kbd> to command · <kbd>ESC</kbd> to stop the current task</div>
     <div class="stats">
       <span>UPTIME <b id="uptime">00:00</b></span>
+      <span>MEMORY <b id="s-mem">0</b></span>
       <span>TASKS <b id="s-tasks">0</b></span>
       <span>ACTIONS <b id="s-tools">0</b></span>
     </div>
@@ -182,7 +183,8 @@ const PAL={
   speaking:{a:[52,211,153],  hex:'#34d399', glow:'rgba(52,211,153,.6)'}
 };
 const ICONS={web_search:'🔎',open_url:'🌐',browser_navigate:'🧭',browser_snapshot:'📸',
-  browser_click:'🖱️',browser_type:'⌨️',browser_key:'⏎',open_app:'🪟',run_shell_command:'⚙️',default:'▸'};
+  browser_click:'🖱️',browser_type:'⌨️',browser_key:'⏎',open_app:'🪟',run_shell_command:'⚙️',
+  look_at_page:'👁️',look_at_screen:'👁️',remember:'🧠',recall:'🧠',default:'▸'};
 
 let STATE='standby';
 let targetLevel=0.05, level=0.05, lastLevelAt=0;
@@ -228,6 +230,8 @@ function dispatch(m){switch(m.kind){
     addAction(m.name,m.summary,m.status||'run');break;}
   case'quota':setQuota(m.usage);break;
   case'task':tasks++;$('#s-tasks').textContent=tasks;break;
+  case'memory':{if(typeof m.count==='number')$('#s-mem').textContent=m.count;
+    if(m.recalled){const b=$('#s-mem');b.style.textShadow='0 0 14px var(--accent-glow)';setTimeout(()=>b.style.textShadow='',900);}break;}
   case'toast':toast(m.text,m.level);break;
   case'online':{const d=$('#conn-dot');d.classList.toggle('off',!m.up);$('#conn').textContent=m.up?'ONLINE':'OFFLINE';break;}
 }}
@@ -365,6 +369,7 @@ window.JARVIS={dispatch,pushLevel,
    [1500,()=>dispatch({kind:'user',text:'Jarvis, post about this week in AI on my LinkedIn'})],
    [1900,()=>dispatch({kind:'state',state:'thinking',sub:'reasoning'})],
    [2100,()=>dispatch({kind:'brain',provider:'gemini',model:'gemini-2.5-flash',key:2})],
+   [2200,()=>{dispatch({kind:'memory',count:14,recalled:2});dispatch({kind:'toast',text:'🧠 recalled 2 memories',level:'info'});}],
    [2300,()=>dispatch({kind:'quota',usage:[{key:1,model:'gemini-2.5-flash',used:20,limit:20},{key:2,model:'gemini-2.5-flash',used:7,limit:20},{key:3,model:'gemini-2.5-flash',used:2,limit:20}]})],
    [2600,()=>{dispatch({kind:'state',state:'acting',sub:'searching the web'});dispatch({kind:'tool',name:'web_search',summary:'AI news this week'});}],
    [3300,()=>dispatch({kind:'tool',name:'web_search',status:'ok',detail:'12 results'})],
@@ -375,7 +380,9 @@ window.JARVIS={dispatch,pushLevel,
    [5100,()=>dispatch({kind:'tool',name:'browser_type',summary:'[2] editor — drafting'})],
    [5900,()=>dispatch({kind:'tool',name:'browser_type',status:'ok',detail:'text in editor'})],
    [6100,()=>dispatch({kind:'tool',name:'browser_click',summary:'[31] Post'})],
-   [6700,()=>{dispatch({kind:'tool',name:'browser_click',status:'ok',detail:'published'});dispatch({kind:'task'});}],
+   [6700,()=>dispatch({kind:'tool',name:'browser_click',status:'ok',detail:'clicked'})],
+   [6800,()=>{dispatch({kind:'toast',text:'👁 verifying with vision…',level:'info'});dispatch({kind:'tool',name:'look_at_page',summary:'did the post publish?'});}],
+   [7400,()=>{dispatch({kind:'tool',name:'look_at_page',status:'ok',detail:'post is live on feed ✓'});dispatch({kind:'task'});}],
    [6900,()=>{dispatch({kind:'state',state:'speaking',sub:'responding'});J.voice(2200,0.35);}],
    [7000,()=>dispatch({kind:'jarvis',text:'Done — your weekly AI roundup is posted to LinkedIn.'})],
    [9400,()=>dispatch({kind:'state',state:'standby',sub:'ready'})],

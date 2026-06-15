@@ -18,9 +18,21 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 - **LLM brain** — Google Gemini 2.5 Flash (free tier) with automatic multi-key
   and multi-model rotation, falling back to a **local Ollama** model
   (`qwen2.5:7b`) when offline or rate-limited.
+- **Vision (multimodal)** — Jarvis can *see*. It can look at your **screen**
+  (`look_at_screen`) to read an error or describe what's open, and look at the
+  **live browser page** (`look_at_page`) to *visually verify* an action
+  actually worked (e.g. confirm a post published) instead of trusting the DOM.
+  Powered by Gemini's free multimodal vision.
+- **Long-term memory (free RAG)** — Jarvis remembers durable facts about you
+  (preferences, accounts, how you like things done) using free Gemini
+  embeddings + a local vector store, and **automatically recalls the relevant
+  ones before every command** by semantic similarity. Stored privately in
+  `jarvis_memory.json` (git-ignored); embeddings use a separate quota pool, so
+  they never touch the 20/day generate budget.
 - **General browser automation** — a DOM snapshot tags every interactive
   element with a number; the model clicks/types by number, so it can operate
-  *any* website without site-specific code.
+  *any* website without site-specific code — now backed by **vision-based
+  verification** for the steps the DOM can't confirm.
 - **Native app & system control** — via the Windows accessibility API
   (pywinauto) and shell commands, not pixel clicking.
 - **Interrupt anytime** — press **ESC** to stop the current task mid-action.

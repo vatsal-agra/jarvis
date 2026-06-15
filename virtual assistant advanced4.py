@@ -19,7 +19,9 @@ Install:
 """
 
 import asyncio
+import base64
 import datetime
+import io
 import json
 import math
 import os
@@ -1036,6 +1038,83 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "look_at_page",
+            "description": (
+                "SEE the current browser page with real computer vision (you have eyes). "
+                "Use this to VISUALLY VERIFY the result of an action when the element list is "
+                "not enough — e.g. after submitting, confirm a post actually published; read an "
+                "error dialog, a CAPTCHA prompt, a chart, or any visual content the DOM text "
+                "doesn't capture. Ask a specific question about what is on screen."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string",
+                        "description": "What you want to know about the page, e.g. 'Did my post publish successfully? What does the confirmation say?'"}
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "look_at_screen",
+            "description": (
+                "SEE the user's entire desktop screen with real computer vision. Use when the "
+                "user asks about what is on their screen, to read an on-screen error/message, "
+                "describe an image or app, or understand visual context outside the browser."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string",
+                        "description": "What to look for or answer about the screen."}
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember",
+            "description": (
+                "Save a durable fact about the user to long-term memory so you recall it in "
+                "future conversations — preferences, names, accounts, recurring tasks, how they "
+                "like things done. Use ONLY for lasting facts, never for one-off chit-chat. "
+                "Relevant memories are surfaced to you automatically before each command."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fact": {"type": "string",
+                        "description": "The fact to remember, written as a standalone sentence, e.g. 'The user prefers concise answers and lives in Vellore.'"}
+                },
+                "required": ["fact"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recall",
+            "description": (
+                "Search your long-term memory for things you know about the user that relate to "
+                "a topic. Use when you need older context that wasn't already surfaced to you."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to look up in memory."}
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 
@@ -1376,6 +1455,45 @@ def execute_tool(name: str, args: dict) -> str:
         except FileNotFoundError:
             return f"Game file not found: {game_file}"
 
+    # ── look_at_page ── (vision: see the live browser page) ─────────────────────
+    elif name == "look_at_page":
+        question = args.get("question", "What is on this page?")
+        try:
+            page = _get_page()
+            png = page.screenshot(type="png")
+            _hud_emit("toast", text="👁 Looking at the page…", level="info")
+            return _gemini_vision(question, base64.b64encode(png).decode(), "image/png")
+        except Exception as e:
+            return f"Vision error (page): {e}"
+
+    # ── look_at_screen ── (vision: see the whole desktop) ───────────────────────
+    elif name == "look_at_screen":
+        question = args.get("question", "What is on the screen?")
+        try:
+            b64, mime = _grab_screen_b64()
+            _hud_emit("toast", text="👁 Looking at your screen…", level="info")
+            return _gemini_vision(question, b64, mime)
+        except Exception as e:
+            return f"Vision error (screen): {e}"
+
+    # ── remember ── (write to long-term semantic memory) ────────────────────────
+    elif name == "remember":
+        fact = (args.get("fact") or "").strip()
+        if not fact:
+            return "Nothing to remember (empty fact)."
+        ok = _mem_add(fact)
+        _hud_emit("toast", text="🧠 Remembered", level="ok")
+        _hud_emit("memory", count=len(_MEM))
+        return "Saved to long-term memory." if ok else "Couldn't reach the memory embedder; not saved."
+
+    # ── recall ── (semantic search of long-term memory) ─────────────────────────
+    elif name == "recall":
+        query = (args.get("query") or "").strip()
+        hits = _mem_search(query, k=5)
+        if not hits:
+            return "I don't have anything in memory about that yet."
+        return "From memory:\n" + "\n".join(f"• {t}" for t, _ in hits)
+
     return f"Unknown tool: {name}"
 
 
@@ -1399,6 +1517,23 @@ Real-time info (news/weather/prices)    → web_search
 Open a native Windows app               → run_shell_command
 Control an open Windows app             → windows_control
 Facts / encyclopedia                    → wikipedia_search
+See / read the user's screen            → look_at_screen
+Visually verify a web action worked     → look_at_page
+Save a lasting fact about the user      → remember
+Look up older context about the user    → recall
+
+━━ YOU HAVE EYES (vision) ━━
+You can SEE. After an important web action whose success isn't obvious from the element
+list — submitting a form, publishing a post, a payment/confirmation screen — call
+look_at_page to VISUALLY CONFIRM it actually worked before telling the user it's done.
+Use look_at_screen when the user asks about anything on their screen. This works on any
+site or app; never assume success, verify it.
+
+━━ YOU HAVE MEMORY ━━
+Durable facts you should recall later (preferences, names, accounts, how the user likes
+things done, recurring tasks) → call remember. Relevant memories are automatically given
+to you before each command under "THINGS YOU REMEMBER"; use them naturally. Use recall
+for older context that wasn't surfaced. Do NOT remember trivial one-off chit-chat.
 
 ━━ BROWSER WORKFLOW (works on ANY website) ━━
 Every browser_snapshot returns a NUMBERED list of the page's interactive elements:
@@ -1583,8 +1718,9 @@ def _gemini_request(messages, tools, temperature) -> dict:
         for offset in range(n):
             idx = (_gemini_key_idx + offset) % n
             key = GEMINI_KEYS[idx]
-            body = {"model": model, "messages": messages,
-                    "tools": tools, "temperature": temperature}
+            body = {"model": model, "messages": messages, "temperature": temperature}
+            if tools:
+                body["tools"] = tools
             for _attempt in range(3):
                 try:
                     r = requests.post(
@@ -1614,6 +1750,122 @@ def _gemini_request(messages, tools, temperature) -> dict:
                 break                              # 401/403/400 — try the next key
         # every key exhausted for this model → fall through to the next model
     raise RuntimeError(f"all Gemini keys+models unavailable ({last_err})")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  VISION  ─  Gemini multimodal (Jarvis can see)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _gemini_vision(prompt: str, image_b64: str, mime: str = "image/png") -> str:
+    """Ask Gemini a question about an image. Uses the same key/model rotation as
+    the text brain (vision works on the free tier). Returns the answer text."""
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
+    ]}]
+    msg = _gemini_request(messages, None, 0.2)   # tools omitted for pure vision
+    return (msg.get("content") or "").strip() or "(no description returned)"
+
+
+def _grab_screen_b64(max_w: int = 1280):
+    """Capture the desktop, downscale, and return (base64_jpeg, mime)."""
+    from PIL import ImageGrab
+    img = ImageGrab.grab()
+    if img.width > max_w:
+        img = img.resize((max_w, int(img.height * max_w / img.width)))
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "JPEG", quality=70)
+    return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  LONG-TERM MEMORY  ─  free Gemini embeddings + local vector store
+#  Jarvis embeds and stores durable facts; before each command the most
+#  relevant ones are recalled by semantic similarity and fed back to the brain.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GEMINI_EMBED_URL   = "https://generativelanguage.googleapis.com/v1beta/openai/embeddings"
+GEMINI_EMBED_MODEL = os.environ.get("JARVIS_EMBED_MODEL", "gemini-embedding-001")
+GEMINI_EMBED_DIM   = 768   # compact, fast cosine; the model supports custom dims
+_MEM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_memory.json")
+_MEM = []   # [{"text":str, "ts":str, "vec":[float]}]
+
+
+def _gemini_embed(texts):
+    """Embed a list of strings via the free embeddings endpoint (key rotation).
+    Returns a list of vectors, or [] on failure."""
+    global _gemini_key_idx
+    if not GEMINI_KEYS:
+        return []
+    n = len(GEMINI_KEYS)
+    body = {"model": GEMINI_EMBED_MODEL, "input": texts, "dimensions": GEMINI_EMBED_DIM}
+    for offset in range(n):
+        idx = (_gemini_key_idx + offset) % n
+        try:
+            r = requests.post(
+                GEMINI_EMBED_URL,
+                headers={"Authorization": f"Bearer {GEMINI_KEYS[idx]}", "Content-Type": "application/json"},
+                json=body, timeout=30,
+            )
+        except Exception:
+            return []
+        if r.status_code == 200:
+            return [d["embedding"] for d in r.json()["data"]]
+        if r.status_code == 429:
+            continue          # this key's embed quota is spent — try the next
+        return []             # other error — give up quietly
+    return []
+
+
+def _cosine(a, b):
+    dot = s1 = s2 = 0.0
+    for x, y in zip(a, b):
+        dot += x * y; s1 += x * x; s2 += y * y
+    return dot / (math.sqrt(s1) * math.sqrt(s2) + 1e-9)
+
+
+def _mem_load():
+    global _MEM
+    try:
+        with open(_MEM_PATH, encoding="utf-8") as f:
+            _MEM = json.load(f)
+    except Exception:
+        _MEM = []
+
+
+def _mem_save():
+    try:
+        with open(_MEM_PATH, "w", encoding="utf-8") as f:
+            json.dump(_MEM, f)
+    except Exception:
+        pass
+
+
+def _mem_add(fact: str) -> bool:
+    """Embed and store a fact. Skips near-duplicates. Returns True on success."""
+    vecs = _gemini_embed([fact])
+    if not vecs:
+        return False
+    vec = vecs[0]
+    for m in _MEM:                               # de-dupe very similar facts
+        if m.get("vec") and _cosine(vec, m["vec"]) > 0.95:
+            m["text"], m["vec"] = fact, vec
+            _mem_save()
+            return True
+    _MEM.append({"text": fact, "ts": datetime.datetime.now().isoformat(timespec="seconds"), "vec": vec})
+    _mem_save()
+    return True
+
+
+def _mem_search(query: str, k: int = 4, threshold: float = 0.30):
+    """Return up to k (text, score) memories most similar to query, above threshold."""
+    if not _MEM or not query.strip():
+        return []
+    qv = _gemini_embed([query])
+    if not qv:
+        return []
+    qv = qv[0]
+    scored = [(m["text"], _cosine(qv, m["vec"])) for m in _MEM if m.get("vec")]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [(t, s) for t, s in scored[:k] if s >= threshold]
 
 
 def _to_ollama_messages(messages):
@@ -1678,7 +1930,22 @@ def brain_chat(messages, tools, temperature):
 
 def process_command(user_input: str, history: list) -> tuple[str, list]:
     history.append({"role": "user", "content": user_input})
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-20:]
+
+    system = SYSTEM_PROMPT
+    # ── Auto-recall: surface relevant long-term memories for this command ──────
+    try:
+        hits = _mem_search(user_input, k=4)
+        if hits:
+            recalled = "\n".join(f"- {t}" for t, _ in hits)
+            system += ("\n\n━━ THINGS YOU REMEMBER ABOUT THIS USER (use if relevant) ━━\n"
+                       + recalled)
+            print(f"   🧠 recalled {len(hits)} memory(ies)")
+            _hud_emit("toast", text=f"🧠 recalled {len(hits)} memory(ies)", level="info")
+            _hud_emit("memory", count=len(_MEM), recalled=len(hits))
+    except Exception:
+        pass
+
+    messages = [{"role": "system", "content": system}] + history[-20:]
 
     final = "Done."
     label_shown = False
@@ -1812,6 +2079,11 @@ if __name__ == "__main__":
         except Exception:
             pass
     _hud_emit("state", state="standby", sub="booting")
+
+    _mem_load()   # load long-term memory from disk
+    if _MEM:
+        print(f"Memory: {len(_MEM)} fact(s) loaded.")
+    _hud_emit("memory", count=len(_MEM))
 
     print("=" * 62)
     print("  JARVIS  —  AI Assistant")

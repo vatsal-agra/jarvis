@@ -5,6 +5,9 @@ jarvis_keys.txt
 *.key
 secrets*.py
 
+# ── Personal long-term memory (private facts about the user) ──────────────
+jarvis_memory.json
+
 # ── Local Chrome profile / login session (cookies, tokens) ────────────────
 .jarvis_chrome_profile/
 
