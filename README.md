@@ -75,6 +75,15 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
   glances at your screen and speaks up if it can help (off by default).
 - **Memory drawer** — open "What I know about you" on the HUD to see everything
   Jarvis has learned; say "forget that" to delete a memory.
+- **Universal desktop control** — operates *any* Windows app, not just the
+  browser: it screenshots the foreground window, numbers its real UI-Automation
+  controls (Set-of-Marks), asks Gemini which one you mean, and clicks/types it
+  with pyautogui. Notepad, Settings, Spotify, VS Code, games — anything.
+- **Self-authored skills** — "learn to do X" makes Jarvis *write a new Python
+  tool for itself*, save it to `jarvis_skills/`, hot-load it, and use it forever.
+- **Autonomous mission mode** — give it a goal; it plans, executes, **visually
+  verifies its own work**, recovers from failures, and won't stop until the goal
+  is actually done.
 - **Interrupt anytime** — press **ESC** to stop the current task mid-action.
 - **Live HUD** — a cinematic web dashboard (zero extra dependencies, served from
   Python over Server-Sent Events) that visualises the assistant in real time:
@@ -95,7 +104,7 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 pip install SpeechRecognition pyaudio edge-tts pygame wikipedia \
             deep-translator pyshorteners ollama requests ddgs \
             playwright pywinauto keyboard \
-            psutil pyperclip pypdf python-docx Pillow
+            psutil pyperclip pypdf python-docx Pillow pyautogui
 python -m playwright install chromium
 ```
 

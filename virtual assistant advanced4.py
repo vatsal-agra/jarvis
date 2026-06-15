@@ -1479,6 +1479,66 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_control",
+            "description": (
+                "Control ANY Windows application by sight (not just the browser) — click "
+                "buttons/menus/icons or type into fields in Notepad, Settings, Spotify, VS Code, "
+                "games, anything on screen. Jarvis looks at the foreground window, finds the "
+                "control you describe, and acts on it. Use for desktop apps the browser tools "
+                "can't reach."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "The on-screen control to act on, described visually."},
+                    "action": {"type": "string", "enum": ["click", "double_click", "right_click", "type"]},
+                    "text": {"type": "string", "description": "Text to type (for action=type)."},
+                    "window": {"type": "string", "description": "Optional: title (or part) of the window to focus first."}
+                },
+                "required": ["description", "action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "teach_skill",
+            "description": (
+                "Create a brand-new permanent skill (tool) for yourself by writing Python. Use "
+                "when the user asks you to 'learn to…' something repeatable you don't already have "
+                "a tool for. The code MUST define `def run(args): -> str` where args is a dict with "
+                "an 'input' string. Keep it self-contained (you may import stdlib + requests)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "short snake_case skill name."},
+                    "description": {"type": "string", "description": "what the skill does + what to pass as input."},
+                    "code": {"type": "string", "description": "Python defining def run(args): ... returning a string."}
+                },
+                "required": ["name", "description", "code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mission",
+            "description": (
+                "Enter AUTONOMOUS mission mode for a complex multi-step goal: Jarvis plans, "
+                "executes, VERIFIES its own work with vision, and keeps going until the goal is "
+                "truly done — no further input needed. Use for big 'just get this done' requests."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"goal": {"type": "string", "description": "The end goal to achieve autonomously."}},
+                "required": ["goal"],
+            },
+        },
+    },
 ]
 
 
@@ -2031,6 +2091,26 @@ def execute_tool(name: str, args: dict) -> str:
     elif name == "forget":
         return _forget(args.get("query", ""))
 
+    # ── computer_control (any desktop app by sight) ─────────────────────────────
+    elif name == "computer_control":
+        return _computer_control(args.get("description", ""), args.get("action", "click"),
+                                 args.get("text", ""), args.get("window", ""))
+
+    # ── teach_skill (write a new tool) ──────────────────────────────────────────
+    elif name == "teach_skill":
+        return _teach_skill(args.get("name", ""), args.get("description", ""), args.get("code", ""))
+
+    # ── mission (autonomous mode) ───────────────────────────────────────────────
+    elif name == "mission":
+        return _mission(args.get("goal", ""))
+
+    # ── self-authored skills ────────────────────────────────────────────────────
+    elif name in _SKILLS:
+        try:
+            return str(_SKILLS[name]["func"](args))
+        except Exception as e:
+            return f"Skill '{name}' errored: {e}"
+
     return f"Unknown tool: {name}"
 
 
@@ -2078,6 +2158,9 @@ Convert units (length/mass/temp/…)      → convert_units
 Deep multi-source research              → deep_research
 Watch the screen / offer proactive help → watch_screen
 Forget a stored memory                  → forget
+Control a non-browser desktop app       → computer_control
+Learn a new repeatable ability          → teach_skill
+Autonomously complete a big goal        → mission
 
 ━━ SHOW YOUR PLAN ━━
 For any task with 3 or more steps, FIRST call set_plan with the ordered steps — it
@@ -3148,6 +3231,236 @@ def _forget(query: str) -> str:
     return "I couldn't remove that memory."
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  UNIVERSAL DESKTOP CONTROL  ─  operate ANY Windows app by sight
+#  Set-of-Marks on real UI-Automation rectangles (reliable, not pixel-guessing):
+#  number every visible control of the foreground window on a screenshot, let
+#  Gemini pick the one matching the description, then act on its real centre
+#  with pyautogui. Works in any application, not just the browser.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _desktop_marks_data(window_title: str = "") -> dict:
+    """Enumerate the foreground window's visible controls (id, centre, label) using
+    UI Automation. Runs in a dedicated COM-initialised thread because pywinauto's
+    comtypes clashes with the COM apartment pygame/Playwright set on the main
+    thread ('Cannot change thread mode'). Returns {title, marks} or {error}."""
+    out = {}
+
+    def _work():
+        try:
+            try:
+                import comtypes
+                comtypes.CoInitialize()
+            except Exception:
+                pass
+            import ctypes
+            from pywinauto import Desktop
+            if window_title:
+                try:
+                    Desktop(backend="uia").window(title_re=f".*{re.escape(window_title)}.*").set_focus()
+                    time.sleep(0.5)
+                except Exception:
+                    pass
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            win = Desktop(backend="uia").window(handle=hwnd)
+            out["title"] = win.window_text()
+            marks = []
+            for c in win.descendants():
+                try:
+                    if not c.is_visible():
+                        continue
+                    r = c.rectangle()
+                    w, h = r.right - r.left, r.bottom - r.top
+                    if w < 6 or h < 6 or w > 1900 or h > 1050:
+                        continue
+                    label = (c.window_text() or c.element_info.control_type or "")[:40]
+                    marks.append((r.left + w // 2, r.top + h // 2, label))
+                except Exception:
+                    continue
+                if len(marks) >= 70:
+                    break
+            out["marks"] = marks
+        except Exception as e:
+            out["error"] = str(e)
+
+    t = threading.Thread(target=_work, daemon=True)
+    t.start()
+    t.join(timeout=20)
+    return out
+
+
+def _desktop_pick(description: str, window_title: str = ""):
+    """Return {found, id, x, y, n, title} for the control matching *description*
+    on the foreground window, using Set-of-Marks vision."""
+    from PIL import ImageGrab, ImageDraw
+    data = _desktop_marks_data(window_title)
+    if data.get("error"):
+        return {"found": False, "error": data["error"]}
+    title = data.get("title", "")
+    marks = data.get("marks", [])
+    if not marks:
+        return {"found": False, "title": title, "n": 0}
+    img = ImageGrab.grab().convert("RGB")
+    draw = ImageDraw.Draw(img)
+    for i, (x, y, _lab) in enumerate(marks):
+        draw.ellipse([x - 13, y - 10, x + 13, y + 10], fill=(255, 40, 90))
+        draw.text((x - 4 * len(str(i)), y - 6), str(i), fill=(255, 255, 255))
+    buf = io.BytesIO(); img.convert("RGB").save(buf, "JPEG", quality=70)
+    prompt = (f"Each UI control is marked with a pink numbered badge. Which badge number is on: "
+              f"\"{description}\"? Reply ONLY JSON: {{\"id\": <n>, \"found\": true}} or {{\"found\": false}}.")
+    ans = _gemini_vision(prompt, base64.b64encode(buf.getvalue()).decode(), "image/jpeg")
+    mt = re.search(r"\{.*\}", ans, re.S)
+    data = json.loads(mt.group(0)) if mt else {}
+    if not data.get("found") or "id" not in data or not (0 <= int(data["id"]) < len(marks)):
+        return {"found": False, "title": title, "n": len(marks)}
+    x, y, lab = marks[int(data["id"])]
+    return {"found": True, "id": int(data["id"]), "x": x, "y": y, "n": len(marks), "label": lab, "title": title}
+
+
+def _computer_control(description: str, action: str = "click", text: str = "", window: str = "") -> str:
+    try:
+        import pyautogui
+    except Exception:
+        return "Desktop control needs pyautogui (pip install pyautogui)."
+    pick = _desktop_pick(description, window)
+    if not pick.get("found"):
+        return (f"I couldn't visually find '{description}' in '{pick.get('title','the active window')}' "
+                f"(scanned {pick.get('n',0)} controls).")
+    x, y = pick["x"], pick["y"]
+    act = (action or "click").lower()
+    try:
+        pyautogui.moveTo(x, y, duration=0.15)
+        if act in ("click", "left", ""):
+            pyautogui.click(x, y)
+        elif act in ("double", "double_click", "doubleclick"):
+            pyautogui.doubleClick(x, y)
+        elif act in ("right", "right_click", "rightclick"):
+            pyautogui.rightClick(x, y)
+        elif act == "type":
+            pyautogui.click(x, y); time.sleep(0.2)
+            pyautogui.typewrite(text, interval=0.02)
+        else:
+            pyautogui.click(x, y)
+        _hud_emit("tool", name="computer_control", summary=f"{act}: {pick.get('label','')[:30]}", status="ok")
+        return f"Did '{act}' on '{description}' (control [{pick['id']}] '{pick.get('label','')}') in '{pick['title']}'."
+    except Exception as e:
+        return f"Desktop action error: {e}"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  SELF-AUTHORED SKILLS  ─  Jarvis writes & hot-loads new tools at runtime
+#  Saved to jarvis_skills/<name>.py (reviewable). Each defines run(args)->str.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_SKILLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_skills")
+_SKILLS = {}   # name -> {"func": callable, "description": str}
+
+
+def _load_one_skill(path: str) -> bool:
+    import importlib.util as _il
+    name = os.path.splitext(os.path.basename(path))[0]
+    try:
+        spec = _il.spec_from_file_location(f"jarvis_skill_{name}", path)
+        mod = _il.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if not hasattr(mod, "run"):
+            return False
+        desc = getattr(mod, "DESCRIPTION", f"Custom skill '{name}'.")
+        _SKILLS[name] = {"func": mod.run, "description": desc}
+        _register_skill_tool(name, desc)
+        return True
+    except Exception as e:
+        print(f"   ⚠ skill '{name}' failed to load: {e}")
+        return False
+
+
+def _register_skill_tool(name: str, description: str):
+    if any(t["function"]["name"] == name for t in TOOLS):
+        return
+    TOOLS.append({"type": "function", "function": {
+        "name": name,
+        "description": description + " (a skill Jarvis taught itself)",
+        "parameters": {"type": "object", "properties": {
+            "input": {"type": "string", "description": "Input for the skill."}}},
+    }})
+
+
+def _load_skills():
+    if not os.path.isdir(_SKILLS_DIR):
+        return
+    for fn in os.listdir(_SKILLS_DIR):
+        if fn.endswith(".py"):
+            _load_one_skill(os.path.join(_SKILLS_DIR, fn))
+
+
+def _teach_skill(name: str, description: str, code: str) -> str:
+    name = re.sub(r"[^a-z0-9_]", "", name.lower().strip())
+    if not name:
+        return "Invalid skill name."
+    if "def run(" not in code:
+        return "Skill code must define a function: def run(args): ... returning a string."
+    os.makedirs(_SKILLS_DIR, exist_ok=True)
+    path = os.path.join(_SKILLS_DIR, f"{name}.py")
+    content = f"DESCRIPTION = {description!r}\n\n{code}\n"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as e:
+        return f"Couldn't save skill: {e}"
+    if _load_one_skill(path):
+        _hud_emit("toast", text=f"🧩 learned skill: {name}", level="ok")
+        return f"Learned a new skill '{name}'. I can use it from now on."
+    return f"Saved '{name}' but it failed to load — the code may have an error."
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AUTONOMOUS MISSION MODE  ─  plan → act → self-verify → loop until done
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_MISSION_SYS = (
+    "You are Jarvis in AUTONOMOUS MISSION mode. You are given a GOAL and must achieve it "
+    "end-to-end without further user input. Rules:\n"
+    "1. FIRST call set_plan with the concrete steps.\n"
+    "2. Execute steps using your tools; call complete_step after each.\n"
+    "3. VERIFY your own work — after web/desktop actions use look_at_page or look_at_screen "
+    "to confirm the real outcome before believing a step succeeded. If a step failed, adapt "
+    "and retry a different way.\n"
+    "4. Only when the goal is genuinely verified complete, reply with a short final summary "
+    "starting with 'MISSION COMPLETE:'. Do not claim success you haven't verified."
+)
+
+
+def _mission(goal: str, max_rounds: int = 12) -> str:
+    messages = [{"role": "system", "content": _MISSION_SYS},
+                {"role": "user", "content": f"GOAL: {goal}"}]
+    _hud_emit("toast", text="🚀 mission started", level="info")
+    mission_tools = [t for t in TOOLS if t["function"]["name"] != "mission"]
+    final = "Mission ended."
+    for _ in range(max_rounds):
+        if _ABORT.is_set():
+            return "Mission stopped."
+        try:
+            assistant, _label = brain_chat(messages, mission_tools, 0.2)
+        except Exception as e:
+            return f"Mission error: {e}"
+        messages.append(assistant)
+        content = (assistant.get("content") or "").strip()
+        if content:
+            final = content
+        calls = assistant.get("tool_calls")
+        if not calls:
+            break                                  # model is done talking
+        for tc in calls:
+            nm = tc["function"]["name"]
+            try:
+                a = json.loads(tc["function"].get("arguments") or "{}")
+            except Exception:
+                a = {}
+            res = execute_tool(nm, a)
+            messages.append({"role": "tool", "tool_call_id": tc.get("id", "call_0"), "content": str(res)[:2500]})
+        if "MISSION COMPLETE" in content.upper():
+            break
+    _hud_emit("toast", text="🏁 mission finished", level="ok")
+    return final
+
+
 def _to_ollama_messages(messages):
     """Convert OpenAI-format messages to what the Ollama client expects. The key
     difference: OpenAI tool_calls store `arguments` as a JSON STRING, but Ollama's
@@ -3366,6 +3679,10 @@ if __name__ == "__main__":
     _hud_emit("memory", count=len(_MEM))
 
     _emit_memory_list()   # populate the HUD memory drawer
+
+    _load_skills()        # load any self-authored skills from jarvis_skills/
+    if _SKILLS:
+        print(f"Skills: {len(_SKILLS)} self-authored skill(s) loaded — {', '.join(_SKILLS)}.")
 
     _rem_load()   # restore any pending reminders from a previous session
     threading.Thread(target=_reminder_loop, daemon=True).start()   # fires reminders when due
