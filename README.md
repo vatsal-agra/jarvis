@@ -68,6 +68,13 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 - **Knowledge tools** — **read/summarise any web article** by URL, live
   **crypto prices**, **dictionary** definitions, and **unit conversion**
   (length/mass/volume/speed/data/temperature) — all free.
+- **Autonomous research** — `deep_research` fans out across multiple web
+  sources, reads them, and synthesises a cited answer (sources are free; only
+  the final synthesis is one Gemini call).
+- **Proactive "watch my screen"** — opt-in mode where Jarvis periodically
+  glances at your screen and speaks up if it can help (off by default).
+- **Memory drawer** — open "What I know about you" on the HUD to see everything
+  Jarvis has learned; say "forget that" to delete a memory.
 - **Interrupt anytime** — press **ESC** to stop the current task mid-action.
 - **Live HUD** — a cinematic web dashboard (zero extra dependencies, served from
   Python over Server-Sent Events) that visualises the assistant in real time:

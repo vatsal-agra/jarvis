@@ -124,6 +124,19 @@ body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14p
   border-radius:10px;padding:7px 12px;font-size:11px;letter-spacing:.5px;backdrop-filter:blur(6px);animation:rise .35s ease both}
 .rem .rt{color:var(--amber);font-variant-numeric:tabular-nums;text-shadow:0 0 8px rgba(255,176,32,.4)}
 .rem .rx{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* memory drawer */
+.memdrawer{position:fixed;right:-360px;top:0;bottom:0;width:340px;z-index:40;background:rgba(6,12,22,.95);
+  border-left:1px solid var(--line);backdrop-filter:blur(10px);transition:right .35s ease;padding:18px;overflow-y:auto}
+.memdrawer.open{right:0}
+.memdrawer h3{font-size:11px;letter-spacing:2px;color:var(--accent);margin-bottom:14px;display:flex;justify-content:space-between}
+.memdrawer h3 #md-close{cursor:pointer;color:var(--ink-dim)}
+.mfact{font-size:12px;line-height:1.5;color:var(--ink);border-left:2px solid var(--violet);
+  padding:7px 10px;margin-bottom:8px;background:rgba(167,139,250,.06);border-radius:0 8px 8px 0;animation:rise .3s ease both}
+/* watching indicator */
+.watchdot{position:fixed;top:74px;right:22px;z-index:26;display:none;align-items:center;gap:7px;
+  font-size:10px;letter-spacing:2px;color:var(--green);background:rgba(8,16,28,.8);border:1px solid rgba(52,211,153,.4);
+  border-radius:30px;padding:6px 12px;box-shadow:0 0 16px rgba(52,211,153,.25)}
+.watchdot.on{display:flex;animation:blink 2s infinite}
 
 /* boot sequence */
 #boot{position:fixed;inset:0;z-index:60;background:radial-gradient(circle at 50% 50%,#06121f,#02050a 70%);
@@ -146,6 +159,11 @@ body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14p
 <div class="toasts" id="toasts"></div>
 <div class="planbar" id="planbar"></div>
 <div class="reminders" id="reminders"></div>
+<div class="memdrawer" id="memdrawer">
+  <h3>🧠 WHAT I KNOW ABOUT YOU <span id="md-close">✕</span></h3>
+  <div id="md-list"></div>
+</div>
+<div class="watchdot" id="watchdot">👁 WATCHING</div>
 <div class="cmdbar"><input id="cmd" placeholder="⌨  type a command for Jarvis…  (Enter to send)" autocomplete="off" spellcheck="false"></div>
 
 <div id="boot">
@@ -200,7 +218,7 @@ body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14p
     <div class="hints">Say <kbd>“Jarvis …”</kbd> to command · <kbd>ESC</kbd> to stop the current task</div>
     <div class="stats">
       <span>UPTIME <b id="uptime">00:00</b></span>
-      <span>MEMORY <b id="s-mem">0</b></span>
+      <span id="memtoggle" style="cursor:pointer">MEMORY <b id="s-mem">0</b> ▾</span>
       <span>TASKS <b id="s-tasks">0</b></span>
       <span>ACTIONS <b id="s-tools">0</b></span>
     </div>
@@ -223,7 +241,7 @@ const ICONS={web_search:'🔎',open_url:'🌐',browser_navigate:'🧭',browser_s
   get_weather:'🌦️',set_reminder:'⏰',read_clipboard:'📋',ask_file:'📄',calculate:'🧮',get_news:'📰',
   daily_briefing:'🌅',set_plan:'📋',complete_step:'✅',browser_scroll:'📜',browser_tab:'🗂️',
   write_file:'💾',convert_currency:'💱',media_control:'🎵',read_url:'🔗',get_crypto_price:'₿',
-  define_word:'📖',convert_units:'📐',default:'▸'};
+  define_word:'📖',convert_units:'📐',deep_research:'🔬',watch_screen:'👁️',forget:'🗑️',default:'▸'};
 
 let STATE='standby';
 let targetLevel=0.05, level=0.05, lastLevelAt=0;
@@ -297,6 +315,9 @@ function dispatch(m){switch(m.kind){
   case'vitals':setVitals(m);break;
   case'plan':setPlan(m.steps,m.done||0);break;
   case'reminders':REMINDERS=m.items||[];renderReminders();break;
+  case'memory_list':{if(typeof m.count==='number')$('#s-mem').textContent=m.count;
+    const l=$('#md-list');l.innerHTML=(m.items&&m.items.length)?m.items.map(t=>`<div class="mfact">${t}</div>`).join(''):'<div class="empty">Nothing learned yet.</div>';break;}
+  case'watch':$('#watchdot').classList.toggle('on',!!m.on);break;
   case'toast':toast(m.text,m.level);break;
   case'online':{const d=$('#conn-dot');d.classList.toggle('off',!m.up);$('#conn').textContent=m.up?'ONLINE':'OFFLINE';break;}
 }}
@@ -423,6 +444,11 @@ function connect(){try{const es=new EventSource('/events');
 resize();setState('standby','ready');requestAnimationFrame(frame);
 boot(()=>connect());
 
+/* memory drawer toggle */
+const md=$('#memdrawer'),mt=$('#memtoggle');
+if(mt)mt.addEventListener('click',()=>md.classList.toggle('open'));
+const mdc=$('#md-close');if(mdc)mdc.addEventListener('click',()=>md.classList.remove('open'));
+
 /* typed-command bar → POST to the Python backend */
 const cmd=$('#cmd');
 if(cmd)cmd.addEventListener('keydown',e=>{
@@ -452,6 +478,7 @@ window.JARVIS={dispatch,pushLevel,
    [2200,()=>{dispatch({kind:'memory',count:14,recalled:2});dispatch({kind:'toast',text:'🧠 recalled 2 memories',level:'info'});}],
    [2350,()=>dispatch({kind:'plan',steps:['Research AI news','Open LinkedIn','Draft post','Publish','Verify'],done:0})],
    [2400,()=>dispatch({kind:'reminders',items:[{text:'Stand-up meeting',at:Date.now()/1000+185},{text:'Call the bank',at:Date.now()/1000+932}]})],
+   [2420,()=>dispatch({kind:'memory_list',count:14,items:['Prefers concise, direct answers','Vegetarian; loves spicy ramen','Studies CS at VIT Vellore','Posts AI content on LinkedIn','Works best late at night']})],
    [2300,()=>dispatch({kind:'quota',usage:[{key:1,model:'gemini-2.5-flash',used:20,limit:20},{key:2,model:'gemini-2.5-flash',used:7,limit:20},{key:3,model:'gemini-2.5-flash',used:2,limit:20}]})],
    [2600,()=>{dispatch({kind:'state',state:'acting',sub:'searching the web'});dispatch({kind:'tool',name:'web_search',summary:'AI news this week'});}],
    [3300,()=>{dispatch({kind:'tool',name:'web_search',status:'ok',detail:'12 results'});dispatch({kind:'plan',steps:['Research AI news','Open LinkedIn','Draft post','Publish','Verify'],done:1});}],

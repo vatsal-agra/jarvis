@@ -1429,6 +1429,56 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "deep_research",
+            "description": (
+                "Thoroughly research a topic across MULTIPLE web sources and give a synthesised, "
+                "cited answer. Use for open questions needing real research ('research X', "
+                "'compare Y vs Z', 'what's the consensus on…'), not simple lookups."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string"},
+                    "depth": {"type": "integer", "description": "How many sources to read (1-5, default 3)."}
+                },
+                "required": ["topic"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "watch_screen",
+            "description": (
+                "Turn proactive screen-watching ON or OFF. When on, Jarvis periodically glances "
+                "at the screen and offers help if you seem stuck. Use when the user asks Jarvis "
+                "to 'watch my screen' / 'keep an eye out' / 'stop watching'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "enabled": {"type": "boolean"},
+                    "interval_seconds": {"type": "integer", "description": "Seconds between glances (default 90, min 30)."}
+                },
+                "required": ["enabled"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forget",
+            "description": "Delete a stored long-term memory that matches a description. Use when the user says 'forget that' / 'forget what I said about X'.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Which memory to remove."}},
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 
@@ -1959,6 +2009,28 @@ def execute_tool(name: str, args: dict) -> str:
             val = 0.0
         return _convert_units(val, args.get("from_unit", ""), args.get("to_unit", ""))
 
+    # ── deep_research ────────────────────────────────────────────────────────---
+    elif name == "deep_research":
+        return _deep_research(args.get("topic", ""), args.get("depth", 3))
+
+    # ── watch_screen ─────────────────────────────────────────────────────────---
+    elif name == "watch_screen":
+        _WATCH["on"] = bool(args.get("enabled", False))
+        if args.get("interval_seconds"):
+            try:
+                _WATCH["interval"] = max(30, int(args["interval_seconds"]))
+            except Exception:
+                pass
+        _hud_emit("toast", text=("👁 watching your screen" if _WATCH["on"] else "watch mode off"),
+                  level="info")
+        _hud_emit("watch", on=_WATCH["on"])
+        return ("Watching your screen — I'll speak up if I can help."
+                if _WATCH["on"] else "Stopped watching your screen.")
+
+    # ── forget ───────────────────────────────────────────────────────────────---
+    elif name == "forget":
+        return _forget(args.get("query", ""))
+
     return f"Unknown tool: {name}"
 
 
@@ -2003,6 +2075,9 @@ Summarise an article / read a link      → read_url
 Crypto price                            → get_crypto_price
 Define a word                           → define_word
 Convert units (length/mass/temp/…)      → convert_units
+Deep multi-source research              → deep_research
+Watch the screen / offer proactive help → watch_screen
+Forget a stored memory                  → forget
 
 ━━ SHOW YOUR PLAN ━━
 For any task with 3 or more steps, FIRST call set_plan with the ordered steps — it
@@ -2384,9 +2459,11 @@ def _mem_add(fact: str) -> bool:
         if m.get("vec") and _cosine(vec, m["vec"]) > 0.95:
             m["text"], m["vec"] = fact, vec
             _mem_save()
+            _emit_memory_list()
             return True
     _MEM.append({"text": fact, "ts": datetime.datetime.now().isoformat(timespec="seconds"), "vec": vec})
     _mem_save()
+    _emit_memory_list()
     return True
 
 
@@ -2821,20 +2898,25 @@ def _convert_currency(amount: float, frm: str, to: str) -> str:
         return f"Currency error: {e}"
 
 
-def _read_url(url: str, question: str = "") -> str:
-    """Fetch a web page, extract readable text, and summarise/answer with Gemini."""
+def _fetch_page_text(url: str, limit: int = 12000) -> str:
+    """Fetch a URL and return readable plain text (no LLM call). '' on failure."""
     if not url.startswith("http"):
         url = "https://" + url
     try:
         html = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"}).text
-    except Exception as e:
-        return f"Couldn't fetch that page: {e}"
+    except Exception:
+        return ""
     html = re.sub(r"(?is)<(script|style|noscript|svg|header|footer|nav)[^>]*>.*?</\1>", " ", html)
     text = re.sub(r"(?s)<[^>]+>", " ", html)
     text = re.sub(r"&[a-z]+;", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()[:12000]
+    return re.sub(r"\s+", " ", text).strip()[:limit]
+
+
+def _read_url(url: str, question: str = "") -> str:
+    """Fetch a web page, extract readable text, and summarise/answer with Gemini."""
+    text = _fetch_page_text(url)
     if not text:
-        return "That page had no readable text."
+        return "Couldn't fetch or read that page."
     task = question.strip() or "Summarise this page in 3-4 spoken-friendly sentences."
     messages = [
         {"role": "system", "content": "Use ONLY the page text below. Be concise and spoken-friendly.\n\nPAGE:\n" + text},
@@ -2959,6 +3041,111 @@ def _media_control(action: str) -> str:
         return f"Sent media key: {action}."
     except Exception as e:
         return f"Couldn't send media key: {e}"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AUTONOMOUS RESEARCH  ─  multi-source web research → cited synthesis
+#  Searches + page fetches are FREE (DuckDuckGo + plain HTTP); only the final
+#  synthesis is a single Gemini call, so a deep dive costs ~1 request.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _deep_research(topic: str, depth: int = 3) -> str:
+    depth = max(1, min(5, int(depth)))
+    _set_plan([f"Search: {topic[:30]}", "Read sources", "Synthesise"])
+    _hud_emit("toast", text="🔬 researching…", level="info")
+    # 1) gather candidate sources (free)
+    urls = []
+    try:
+        from ddgs import DDGS
+        with DDGS() as ddgs:
+            for r in ddgs.text(topic, max_results=depth + 3):
+                if r.get("href"):
+                    urls.append((r["title"], r["href"]))
+    except Exception as e:
+        return f"Research search failed: {e}"
+    _complete_step(0)
+    # 2) read the top pages (free)
+    sources, used = [], []
+    for title, url in urls:
+        if len(sources) >= depth:
+            break
+        txt = _fetch_page_text(url, limit=4000)
+        if len(txt) > 300:
+            sources.append(f"SOURCE [{len(sources)+1}] {title} — {url}\n{txt}")
+            used.append(f"[{len(sources)}] {url}")
+            _hud_emit("tool", name="read_url", summary=title[:48], status="ok")
+    _complete_step(1)
+    if not sources:
+        return "I couldn't read enough sources to research that."
+    # 3) one synthesis call
+    prompt = ("Research the user's topic using the sources below. Give a clear, well-structured "
+              "answer (5-8 sentences) that synthesises across sources and notes any disagreement. "
+              "End with a one-line 'Sources:' list of the numbers used.\n\nTOPIC: " + topic +
+              "\n\n" + "\n\n".join(sources)[:28000])
+    try:
+        ans = (_gemini_request([{"role": "user", "content": prompt}], None, 0.3).get("content") or "").strip()
+    except Exception as e:
+        return f"Research synthesis failed: {e}"
+    _complete_step(2)
+    return ans + "\n\nSources:\n" + "\n".join(used)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  PROACTIVE WATCH MODE  ─  periodic vision glances that offer help
+#  OFF by default (each glance spends 1 Gemini request). User toggles it on.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_WATCH = {"on": False, "interval": 90}
+
+
+def _watch_glance() -> str:
+    """One proactive look at the screen. Returns a suggestion, or '' if nothing useful."""
+    try:
+        b64, mime = _grab_screen_b64()
+    except Exception:
+        return ""
+    prompt = ("You are a proactive assistant glancing at the user's screen. If they appear "
+              "stuck, have an error, or there's something genuinely helpful you could offer, "
+              "reply with ONE short spoken suggestion (max 20 words). If nothing is worth "
+              "interrupting them for, reply with exactly: NONE")
+    try:
+        ans = _gemini_vision(prompt, b64, mime).strip()
+    except Exception:
+        return ""
+    return "" if ans.upper().startswith("NONE") or len(ans) < 4 else ans
+
+
+def _watch_loop() -> None:
+    while True:
+        if _WATCH["on"]:
+            tip = _watch_glance()
+            if tip:
+                _hud_emit("toast", text="💡 " + tip[:60], level="info")
+                try:
+                    speak(tip)
+                except Exception:
+                    pass
+        time.sleep(max(30, int(_WATCH["interval"])) if _WATCH["on"] else 5)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  MEMORY DRAWER + FORGET
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _emit_memory_list():
+    _hud_emit("memory_list", items=[m["text"] for m in _MEM][-60:], count=len(_MEM))
+
+
+def _forget(query: str) -> str:
+    hits = _mem_search(query, k=1, threshold=0.35)
+    if not hits:
+        return "I couldn't find a matching memory to forget."
+    target = hits[0][0]
+    before = len(_MEM)
+    _MEM[:] = [m for m in _MEM if m["text"] != target]
+    if len(_MEM) < before:
+        _mem_save()
+        _emit_memory_list()
+        _hud_emit("memory", count=len(_MEM))
+        return f"Forgotten: {target}"
+    return "I couldn't remove that memory."
 
 
 def _to_ollama_messages(messages):
@@ -3178,10 +3365,13 @@ if __name__ == "__main__":
         print(f"Memory: {len(_MEM)} fact(s) loaded.")
     _hud_emit("memory", count=len(_MEM))
 
+    _emit_memory_list()   # populate the HUD memory drawer
+
     _rem_load()   # restore any pending reminders from a previous session
     threading.Thread(target=_reminder_loop, daemon=True).start()   # fires reminders when due
     threading.Thread(target=_vitals_loop, daemon=True).start()     # streams live system telemetry
     threading.Thread(target=_routine_loop, daemon=True).start()    # proactive daily briefings
+    threading.Thread(target=_watch_loop, daemon=True).start()      # proactive screen-watch (off until enabled)
 
     print("=" * 62)
     print("  JARVIS  —  AI Assistant")
