@@ -3653,6 +3653,109 @@ def process_command(user_input: str, history: list) -> tuple[str, list]:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  TELEGRAM BRIDGE  ─  command Jarvis from your phone, anywhere
+#  Free (Telegram Bot API). Runs the SAME brain + tools as voice, but over
+#  chat. Locked to your chat id only. Dependency-free (raw HTTP via requests).
+#    Setup: message @BotFather → /newbot → put the token in .env as
+#           JARVIS_TELEGRAM_TOKEN=...   then message your bot once; it replies
+#           with your chat id → add JARVIS_TELEGRAM_CHAT_ID=... and restart.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+JARVIS_TG_TOKEN = os.environ.get("JARVIS_TELEGRAM_TOKEN", "").strip()
+JARVIS_TG_CHAT  = os.environ.get("JARVIS_TELEGRAM_CHAT_ID", "").strip()
+_BRAIN_LOCK = threading.Lock()   # serialize voice vs phone so they never collide
+_tg_history = []                 # separate conversation context for the phone channel
+
+
+def _tg_call(method: str, **params):
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{JARVIS_TG_TOKEN}/{method}",
+                          json=params, timeout=70)
+        return r.json()
+    except Exception:
+        return {}
+
+
+def _tg_send(text: str, chat_id=None):
+    if not text:
+        return
+    # Telegram caps messages at 4096 chars.
+    _tg_call("sendMessage", chat_id=chat_id or JARVIS_TG_CHAT, text=str(text)[:4000])
+
+
+def _tg_send_photo(path: str, chat_id=None, caption: str = ""):
+    try:
+        with open(path, "rb") as f:
+            requests.post(f"https://api.telegram.org/bot{JARVIS_TG_TOKEN}/sendPhoto",
+                          data={"chat_id": chat_id or JARVIS_TG_CHAT, "caption": caption[:1000]},
+                          files={"photo": f}, timeout=60)
+    except Exception:
+        pass
+
+
+def _tg_handle(text: str, chat_id: str) -> None:
+    """Handle one authorized phone message (runs in its own thread)."""
+    low = text.lower().strip()
+    if low in ("/start", "/help"):
+        _tg_send("Jarvis here. Send me any command and I'll run it on your PC.\n"
+                 "/screenshot — see my screen   /stop — abort the current task", chat_id)
+        return
+    if low.startswith("/stop"):
+        _ABORT.set()
+        _tg_send("Stopping the current task.", chat_id)
+        return
+    if low.startswith("/screen"):
+        try:
+            b64, _mime = _grab_screen_b64()
+            p = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg").name
+            with open(p, "wb") as f:
+                f.write(base64.b64decode(b64))
+            _tg_send_photo(p, chat_id, "Your screen right now")
+            os.unlink(p)
+        except Exception as e:
+            _tg_send(f"Couldn't grab the screen: {e}", chat_id)
+        return
+    # Normal command → run it through the same brain/tools as voice.
+    global _tg_history
+    _tg_send("On it… 🛠", chat_id)
+    _ABORT.clear()
+    try:
+        with _BRAIN_LOCK:
+            _hud_emit("user", text=f"📱 {text}")
+            resp, _tg_history = process_command(text, _tg_history)
+    except Exception as e:
+        resp = f"Something went wrong: {e}"
+    _tg_send(resp if resp and resp != "__ABORTED__" else "Okay, stopped.", chat_id)
+
+
+def _telegram_loop() -> None:
+    if not JARVIS_TG_TOKEN:
+        return
+    me = _tg_call("getMe").get("result", {})
+    print(f"📱 Telegram bridge active as @{me.get('username','?')}"
+          + ("" if JARVIS_TG_CHAT else "  (message it once to get your chat id)"))
+    offset = 0
+    while True:
+        resp = _tg_call("getUpdates", offset=offset, timeout=60)
+        if not resp.get("ok"):
+            time.sleep(3)
+            continue
+        for upd in resp.get("result", []):
+            offset = upd["update_id"] + 1
+            msg = upd.get("message") or upd.get("edited_message") or {}
+            chat_id = str((msg.get("chat") or {}).get("id", ""))
+            text = (msg.get("text") or "").strip()
+            if not text or not chat_id:
+                continue
+            if not JARVIS_TG_CHAT:                       # not yet authorized — help them set it
+                _tg_send(f"Your chat id is {chat_id}.\nAdd  JARVIS_TELEGRAM_CHAT_ID={chat_id}  "
+                         "to your .env and restart me to authorize this chat.", chat_id)
+                continue
+            if chat_id != JARVIS_TG_CHAT:                # ignore everyone except you
+                continue
+            threading.Thread(target=_tg_handle, args=(text, chat_id), daemon=True).start()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  STARTUP
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _gemini_available() -> bool:
@@ -3719,6 +3822,8 @@ if __name__ == "__main__":
     threading.Thread(target=_vitals_loop, daemon=True).start()     # streams live system telemetry
     threading.Thread(target=_routine_loop, daemon=True).start()    # proactive daily briefings
     threading.Thread(target=_watch_loop, daemon=True).start()      # proactive screen-watch (off until enabled)
+    if JARVIS_TG_TOKEN:
+        threading.Thread(target=_telegram_loop, daemon=True).start()   # phone control via Telegram
 
     print("=" * 62)
     print("  JARVIS  —  AI Assistant")
@@ -3823,7 +3928,8 @@ if __name__ == "__main__":
         print(f"\n📨 Sending to AI: {clean}")
         _hud_emit("user", text=clean)
         _ABORT.clear()        # fresh task — ignore any stale stop signal
-        response, conversation_history = process_command(clean, conversation_history)
+        with _BRAIN_LOCK:     # never run a voice task and a phone task at the same time
+            response, conversation_history = process_command(clean, conversation_history)
 
         if response == "__ABORTED__":
             _ABORT.clear()    # consume the stop; ready for the next command

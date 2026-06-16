@@ -83,6 +83,9 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 - **Autonomous mission mode** — give it a goal; it plans, executes, **visually
   verifies its own work**, recovers from failures, and won't stop until the goal
   is actually done.
+- **Phone control (Telegram)** — message Jarvis from anywhere and it runs the
+  command on your PC, replying with the result (and `/screenshot` sends back a
+  live screen grab). Same brain and tools as voice, locked to your chat only.
 - **Interrupt anytime** — press **ESC** to stop the current task mid-action.
 - **Live HUD** — a cinematic web dashboard (zero extra dependencies, served from
   Python over Server-Sent Events) that visualises the assistant in real time:
@@ -125,6 +128,17 @@ weather, news, crypto, units and the calculator don't touch that budget.)
 
 Optional env overrides: `JARVIS_GEMINI_MODELS` (comma-separated model fallback
 chain), `JARVIS_GEMINI_MODEL` (single model).
+
+### Phone control (optional, free)
+
+Control Jarvis from your phone via a Telegram bot:
+1. In Telegram, message **@BotFather** → `/newbot` → copy the token.
+2. Put `JARVIS_TELEGRAM_TOKEN=<token>` in your `.env` and start Jarvis.
+3. Message your new bot once — it replies with your chat id. Add
+   `JARVIS_TELEGRAM_CHAT_ID=<id>` to `.env` and restart.
+
+Now texting the bot runs commands on your PC (it's locked to your chat id only).
+`/screenshot` sends back your screen; `/stop` aborts the current task.
 
 ### Run
 
