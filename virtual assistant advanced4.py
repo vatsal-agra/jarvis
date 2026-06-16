@@ -2445,41 +2445,59 @@ def _gemini_request(messages, tools, temperature) -> dict:
         raise RuntimeError("no Gemini keys configured")
     n = len(GEMINI_KEYS)
     last_err = "unknown"
-    for model in GEMINI_MODELS:
-        for offset in range(n):
-            idx = (_gemini_key_idx + offset) % n
-            key = GEMINI_KEYS[idx]
-            body = {"model": model, "messages": messages, "temperature": temperature}
-            if tools:
-                body["tools"] = tools
-            for _attempt in range(3):
-                try:
-                    r = requests.post(
-                        GEMINI_URL,
-                        headers={"Authorization": f"Bearer {key}",
-                                 "Content-Type": "application/json"},
-                        json=body, timeout=60,
-                    )
-                except Exception as e:
-                    raise RuntimeError(f"network error: {e}")  # offline → fall back now
-                if r.status_code == 200:
-                    _gemini_key_idx = idx          # remember the working key
-                    _gemini_last_model = model     # …and the model that served it
-                    _GEMINI_USAGE[(idx, model)] = _GEMINI_USAGE.get((idx, model), 0) + 1
-                    _hud_quota()
-                    return r.json()["choices"][0]["message"]
-                if r.status_code == 503:
-                    time.sleep(2)                  # model busy — retry same key
-                    last_err = "503 busy"
-                    continue
-                if r.status_code == 429:
-                    last_err = f"429 daily-limit (key {idx + 1}, {model})"
-                    _GEMINI_USAGE[(idx, model)] = 20   # tapped out for the day → bar goes full
-                    _hud_quota()
-                    break                          # key tapped out — try the next key
-                last_err = f"HTTP {r.status_code}: {r.text[:120]}"
-                break                              # 401/403/400 — try the next key
-        # every key exhausted for this model → fall through to the next model
+    # Two retry rounds: if a whole sweep failed ONLY on transient per-minute
+    # throttles (not the daily cap), wait briefly and try again before giving up.
+    for _round in range(2):
+        soft_only = True
+        for model in GEMINI_MODELS:
+            for offset in range(n):
+                idx = (_gemini_key_idx + offset) % n
+                key = GEMINI_KEYS[idx]
+                body = {"model": model, "messages": messages, "temperature": temperature}
+                if tools:
+                    body["tools"] = tools
+                for _attempt in range(3):
+                    try:
+                        r = requests.post(
+                            GEMINI_URL,
+                            headers={"Authorization": f"Bearer {key}",
+                                     "Content-Type": "application/json"},
+                            json=body, timeout=60,
+                        )
+                    except Exception as e:
+                        raise RuntimeError(f"network error: {e}")  # offline → fall back now
+                    if r.status_code == 200:
+                        _gemini_key_idx = idx          # remember the working key
+                        _gemini_last_model = model     # …and the model that served it
+                        _GEMINI_USAGE[(idx, model)] = _GEMINI_USAGE.get((idx, model), 0) + 1
+                        _hud_quota()
+                        return r.json()["choices"][0]["message"]
+                    if r.status_code == 503:
+                        time.sleep(2)                  # model busy — retry same key
+                        last_err = "503 busy"
+                        continue
+                    if r.status_code == 429:
+                        # Distinguish the DAILY cap (key is done for the day) from a
+                        # transient PER-MINUTE throttle (clears in ~seconds). Only the
+                        # daily case should mark the key "full" on the quota meter.
+                        if "perday" in r.text.lower().replace(" ", ""):
+                            _GEMINI_USAGE[(idx, model)] = 20   # genuinely tapped out today
+                            _hud_quota()
+                            last_err = f"429 daily-limit (key {idx + 1}, {model})"
+                        else:
+                            soft_only = soft_only and True    # transient — don't poison meter
+                            last_err = f"429 rate-throttle (key {idx + 1}, {model})"
+                            break                              # rotate to a fresher key
+                        soft_only = False
+                        break                          # key tapped out — try the next key
+                    last_err = f"HTTP {r.status_code}: {r.text[:120]}"
+                    soft_only = False
+                    break                              # 401/403/400 — try the next key
+            # every key exhausted for this model → fall through to the next model
+        if soft_only and _round == 0:
+            time.sleep(15)   # whole sweep was only per-minute throttling — wait it out once
+            continue
+        break
     raise RuntimeError(f"all Gemini keys+models unavailable ({last_err})")
 
 
