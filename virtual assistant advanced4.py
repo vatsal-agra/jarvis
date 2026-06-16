@@ -273,6 +273,27 @@ def _clean_for_speech(text: str) -> str:
     return text.strip()
 
 
+def _speak_offline(text: str) -> bool:
+    """OFFLINE fallback voice — Windows' built-in SAPI via PowerShell. No network,
+    no extra deps, and it runs in its own process so it can't clash with pygame's
+    COM apartment. Used when edge-tts can't reach Microsoft's servers."""
+    try:
+        safe = text.replace("'", "''")
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Add-Type -AssemblyName System.Speech; "
+             "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+             f"$s.Rate = 1; $s.Speak('{safe}')"],
+            timeout=60, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return True
+    except Exception as e:
+        print(f"[Offline TTS error] {e}")
+        return False
+
+
+_edge_tts_broken = False   # once edge-tts fails (no DNS), skip it and go straight offline
+
 try:
     import edge_tts
     import pygame
@@ -289,32 +310,37 @@ try:
         return tmp.name
 
     def speak(text: str) -> None:
+        global _edge_tts_broken
         text = _clean_for_speech(str(text))
         print(f"\n🤖 Jarvis: {text}\n")
         _hud_emit("jarvis", text=text)
         _hud_emit("state", state="speaking", sub="responding")
-        try:
-            import concurrent.futures
-            # Run in a fresh thread so asyncio.run() never conflicts
-            # with Playwright's internal event loop on the main thread.
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                fname = pool.submit(lambda: asyncio.run(_tts_async(text))).result(timeout=30)
-            pygame.mixer.music.load(fname)
-            pygame.mixer.music.play()
-            _spk = 0
-            while pygame.mixer.music.get_busy():
-                if _ABORT.is_set():           # ESC pressed → cut speech short
-                    pygame.mixer.music.stop()
-                    break
-                # Drive the reactor with a lively "talking" envelope while audio plays.
-                _spk += 1
-                env = 0.45 + 0.35 * abs(math.sin(_spk * 0.6)) + 0.15 * abs(math.sin(_spk * 1.9))
-                _hud_emit("level", v=min(1.0, env))
-                pygame.time.wait(60)
-            pygame.mixer.music.unload()
-            os.unlink(fname)
-        except Exception as e:
-            print(f"[TTS Error] {e}")
+        spoke = False
+        if not _edge_tts_broken:
+            try:
+                import concurrent.futures
+                # Fresh thread so asyncio.run() never conflicts with Playwright's loop.
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    fname = pool.submit(lambda: asyncio.run(_tts_async(text))).result(timeout=30)
+                pygame.mixer.music.load(fname)
+                pygame.mixer.music.play()
+                _spk = 0
+                while pygame.mixer.music.get_busy():
+                    if _ABORT.is_set():           # ESC pressed → cut speech short
+                        pygame.mixer.music.stop()
+                        break
+                    _spk += 1
+                    env = 0.45 + 0.35 * abs(math.sin(_spk * 0.6)) + 0.15 * abs(math.sin(_spk * 1.9))
+                    _hud_emit("level", v=min(1.0, env))
+                    pygame.time.wait(60)
+                pygame.mixer.music.unload()
+                os.unlink(fname)
+                spoke = True
+            except Exception as e:
+                print(f"[edge-tts unavailable: {e}]\n   → switching to offline Windows voice for the rest of this session.")
+                _edge_tts_broken = True
+        if not spoke:
+            _speak_offline(text)
         _hud_emit("level", v=0.0)
         _hud_emit("state", state="standby", sub="ready")
 
@@ -362,12 +388,33 @@ def _get_vad():
     return _vad_model
 
 
+_mic_listed = False
+
+
+def _list_input_devices(pa) -> None:
+    """Print available microphones once, so a wrong default device is obvious."""
+    global _mic_listed
+    if _mic_listed:
+        return
+    _mic_listed = True
+    try:
+        default = pa.get_default_input_device_info()
+        print(f"🎤 Mic: using '{default['name']}' (index {default['index']}). "
+              f"Override with JARVIS_MIC_INDEX if this is wrong. Inputs:")
+        for i in range(pa.get_device_count()):
+            d = pa.get_device_info_by_index(i)
+            if d.get("maxInputChannels", 0) > 0:
+                print(f"     [{i}] {d['name']}")
+    except Exception as e:
+        print(f"🎤 Mic: no default input device found ({e}) — check your microphone.")
+
+
 def takeCommand() -> str:
     import pyaudio as _pa
 
     RATE             = 16000   # Hz  — Silero requires 16 kHz
     CHUNK            = 512     # samples per chunk = 32 ms
-    START_THRESH     = 0.5     # VAD prob to consider speech started
+    START_THRESH     = 0.4     # VAD prob to consider speech started
     END_THRESH       = 0.3     # VAD prob below which silence counter ticks
     END_CHUNKS_NEED  = 47      # 47 × 32 ms ≈ 1.5 s of silence → done
     MIN_SPEECH_START = 2       # consecutive speech chunks needed to begin recording
@@ -378,13 +425,20 @@ def takeCommand() -> str:
     model = _get_vad()
     model.reset_states()       # clear RNN state from last call
 
-    pa     = _pa.PyAudio()
-    stream = pa.open(
-        rate=RATE, channels=1,
-        format=_pa.paInt16,
-        input=True,
-        frames_per_buffer=CHUNK,
-    )
+    pa = _pa.PyAudio()
+    _list_input_devices(pa)
+    mic_index = os.environ.get("JARVIS_MIC_INDEX")
+    open_kw = {"rate": RATE, "channels": 1, "format": _pa.paInt16,
+               "input": True, "frames_per_buffer": CHUNK}
+    if mic_index and mic_index.strip().isdigit():
+        open_kw["input_device_index"] = int(mic_index)
+    try:
+        stream = pa.open(**open_kw)
+    except Exception as e:
+        print(f"🎤 Could not open the microphone: {e}")
+        pa.terminate()
+        time.sleep(1)
+        return "none"
 
     print("🎙  Listening...")
     _hud_emit("state", state="listening", sub="listening for “Jarvis…”")
@@ -396,6 +450,8 @@ def takeCommand() -> str:
     silence_count  = 0         # consecutive chunks below END_THRESH
     total_waited   = 0
     lvl_tick       = 0         # throttles HUD audio-level emits
+    peak_prob      = 0.0       # diagnostics: loudest speech-probability this cycle
+    peak_rms       = 0.0       # diagnostics: loudest raw level this cycle
 
     try:
         while True:
@@ -403,10 +459,12 @@ def takeCommand() -> str:
             samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
             prob    = model(torch.from_numpy(samples), RATE).item()
 
+            rms = float(np.sqrt(np.mean(samples * samples)))
+            peak_prob = max(peak_prob, prob)
+            peak_rms = max(peak_rms, rms)
             # Stream the live mic amplitude to the HUD reactor (every ~64 ms).
             lvl_tick += 1
             if lvl_tick % 2 == 0:
-                rms = float(np.sqrt(np.mean(samples * samples)))
                 _hud_emit("level", v=min(1.0, rms * 7.0))
 
             if not speech_started:
@@ -452,6 +510,13 @@ def takeCommand() -> str:
         pa.terminate()
 
     if not recording or not speech_started:
+        # Diagnostics: did the mic capture ANY sound this cycle?
+        if peak_rms < 0.005:
+            print(f"   (heard silence — mic level ~0. Peak level {peak_rms:.4f}. "
+                  f"Check the mic isn't muted / is the right device — see JARVIS_MIC_INDEX.)")
+        else:
+            print(f"   (no speech detected — peak level {peak_rms:.3f}, "
+                  f"peak speech-prob {peak_prob:.2f}. Try speaking a bit louder/closer.)")
         return "none"
 
     # Hand raw PCM bytes to Google STT via SpeechRecognition
