@@ -146,12 +146,60 @@ def _hud_emit(kind: str, **data) -> None:
 
 
 def _hud_quota() -> None:
-    """Emit the per-key/per-model request meter (session counts; 429 marks a key full)."""
+    """Emit the per-key/per-model request meter (429 marks a key full)."""
     rows = []
     for (idx, model), used in sorted(_GEMINI_USAGE.items()):
         rows.append({"key": idx + 1, "model": model, "used": min(used, 20), "limit": 20})
     if rows:
         _hud_emit("quota", usage=rows)
+
+
+# ── Quota persistence ─────────────────────────────────────────────────────────
+# Google resets the free daily quota at midnight US-Pacific, so usage is keyed to
+# the Pacific date and saved to disk — the meter survives restarts and only zeroes
+# out when a genuinely new quota day begins.
+_USAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_usage.json")
+_USAGE_DATE = None
+
+
+def _pacific_date() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+    except Exception:
+        return (datetime.datetime.utcnow() - datetime.timedelta(hours=8)).strftime("%Y-%m-%d")
+
+
+def _usage_save() -> None:
+    try:
+        with open(_USAGE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"date": _USAGE_DATE or _pacific_date(),
+                       "usage": {f"{i}|{mdl}": v for (i, mdl), v in _GEMINI_USAGE.items()}}, f)
+    except Exception:
+        pass
+
+
+def _usage_load() -> None:
+    global _GEMINI_USAGE, _USAGE_DATE
+    _USAGE_DATE = _pacific_date()
+    try:
+        with open(_USAGE_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        if d.get("date") == _USAGE_DATE:          # same quota day → restore counts
+            _GEMINI_USAGE = {(int(k.split("|", 1)[0]), k.split("|", 1)[1]): v
+                             for k, v in d.get("usage", {}).items()}
+    except Exception:
+        pass
+
+
+def _usage_rollover() -> None:
+    """If the Pacific day has changed, the quota reset — clear the meter."""
+    global _USAGE_DATE
+    today = _pacific_date()
+    if _USAGE_DATE != today:
+        _USAGE_DATE = today
+        _GEMINI_USAGE.clear()
+        _usage_save()
 
 
 def _tool_summary(name: str, args: dict) -> str:
@@ -2443,6 +2491,7 @@ def _gemini_request(messages, tools, temperature) -> dict:
     global _gemini_key_idx, _gemini_last_model
     if not GEMINI_KEYS:
         raise RuntimeError("no Gemini keys configured")
+    _usage_rollover()      # zero the meter if a new Pacific quota-day has started
     n = len(GEMINI_KEYS)
     last_err = "unknown"
     # Two retry rounds: if a whole sweep failed ONLY on transient per-minute
@@ -2470,6 +2519,7 @@ def _gemini_request(messages, tools, temperature) -> dict:
                         _gemini_key_idx = idx          # remember the working key
                         _gemini_last_model = model     # …and the model that served it
                         _GEMINI_USAGE[(idx, model)] = _GEMINI_USAGE.get((idx, model), 0) + 1
+                        _usage_save()
                         _hud_quota()
                         return r.json()["choices"][0]["message"]
                     if r.status_code == 503:
@@ -2482,6 +2532,7 @@ def _gemini_request(messages, tools, temperature) -> dict:
                         # daily case should mark the key "full" on the quota meter.
                         if "perday" in r.text.lower().replace(" ", ""):
                             _GEMINI_USAGE[(idx, model)] = 20   # genuinely tapped out today
+                            _usage_save()
                             _hud_quota()
                             last_err = f"429 daily-limit (key {idx + 1}, {model})"
                         else:
@@ -3653,6 +3704,9 @@ if __name__ == "__main__":
     if _MEM:
         print(f"Memory: {len(_MEM)} fact(s) loaded.")
     _hud_emit("memory", count=len(_MEM))
+
+    _usage_load()         # restore today's Gemini usage so the meter survives restarts
+    _hud_quota()
 
     _emit_memory_list()   # populate the HUD memory drawer
 
