@@ -1699,6 +1699,30 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "camera_recall",
+            "description": (
+                "Review the last ~couple minutes of webcam frames (kept locally in memory) to "
+                "answer questions about what happened — 'did anyone come to my desk while I was "
+                "away?', 'was I on my phone?', 'what was I doing earlier?'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"question": {"type": "string"}},
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "focus_report",
+            "description": "Report how long the user has been at their desk and how often they stepped away this session.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -2279,6 +2303,11 @@ def execute_tool(name: str, args: dict) -> str:
         _hud_emit("presence", present=_PRESENCE.get("present", False), on=_PRESENCE["on"])
         return ("Presence awareness on — I'll keep an eye out." if _PRESENCE["on"]
                 else "Presence awareness off; camera released.")
+    elif name == "camera_recall":
+        _hud_emit("toast", text="📷 reviewing recent frames…", level="info")
+        return _camera_recall(args.get("question", "What happened recently?"))
+    elif name == "focus_report":
+        return _focus_report()
 
     # ── self-authored skills ────────────────────────────────────────────────────
     elif name in _SKILLS:
@@ -2339,6 +2368,8 @@ Learn a new repeatable ability          → teach_skill
 Autonomously complete a big goal        → mission
 See the user via their webcam           → look_through_webcam
 Check the user's sitting posture        → check_posture
+Recall recent webcam events             → camera_recall
+How long at desk / focus stats          → focus_report
 
 ━━ YOU CAN SEE THE USER ━━
 A webcam faces the user. look_through_webcam lets you SEE them — use it for "what
@@ -2631,6 +2662,16 @@ def _gemini_vision(prompt: str, image_b64: str, mime: str = "image/png") -> str:
     return (msg.get("content") or "").strip() or "(no description returned)"
 
 
+def _gemini_vision_multi(prompt: str, b64s: list, mime: str = "image/jpeg") -> str:
+    """Ask Gemini about SEVERAL images in one call (e.g. a sequence of webcam
+    frames over time). Returns the answer text."""
+    content = [{"type": "text", "text": prompt}]
+    for b in b64s:
+        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b}"}})
+    msg = _gemini_request([{"role": "user", "content": content}], None, 0.2)
+    return (msg.get("content") or "").strip() or "(no description returned)"
+
+
 def _grab_screen_b64(max_w: int = 1280):
     """Capture the desktop, downscale, and return (base64_jpeg, mime)."""
     from PIL import ImageGrab
@@ -2920,6 +2961,7 @@ def _reminder_loop() -> None:
             _emit_reminders()
         for r in due:
             _hud_emit("toast", text=f"⏰ {r['text']}", level="warn")
+            _away_note(f"a reminder fired ({r['text']})")
             try:
                 speak(f"Reminder: {r['text']}")
             except Exception:
@@ -3730,9 +3772,23 @@ _cam_lock = threading.Lock()
 _cascades = None
 _PRESENCE = {"on": os.environ.get("JARVIS_PRESENCE", "1") != "0",
              "present": False, "since": 0.0, "last_seen": 0.0,
-             "away_since": 0.0, "last_break": 0.0}
+             "away_since": 0.0, "last_break": 0.0,
+             "desk_seconds": 0.0, "away_count": 0, "tick": 0.0}
 # Optional Gemini posture check every N minutes while present (0 = off; costs quota)
 _POSTURE_EVERY = int(os.environ.get("JARVIS_POSTURE_MINUTES", "0") or 0)
+# Away-actions (opt-in): pause media when you leave / resume on return; lock the PC
+_AWAY_PAUSE = os.environ.get("JARVIS_AWAY_PAUSE", "0") != "0"
+_AWAY_LOCK_SEC = int(os.environ.get("JARVIS_AWAY_LOCK_SECONDS", "0") or 0)   # 0 = never
+_AWAY_LOG = []        # notable events while you're away → recapped on return
+_CAM_RING = []        # in-memory ring of recent (ts, jpeg_b64) for camera recall (local only)
+_paused_for_away = False
+_locked_for_away = False
+
+
+def _away_note(text: str) -> None:
+    """Record something that happened while the user is away (for the recap)."""
+    if not _PRESENCE.get("present", True):
+        _AWAY_LOG.append((time.time(), text))
 
 
 def _cascades_load():
@@ -3829,8 +3885,10 @@ def _presence_loop() -> None:
     if not _cascades_load():
         print("📷 Webcam presence disabled (OpenCV unavailable).")
         return
+    global _paused_for_away, _locked_for_away
     last_thumb = 0.0
     last_posture = time.time()
+    _PRESENCE["tick"] = time.time()
     while True:
         if not _PRESENCE["on"]:
             _cam_release()
@@ -3838,24 +3896,47 @@ def _presence_loop() -> None:
             continue
         frame = _cam_frame()
         now = time.time()
+        # accumulate at-desk time
+        dt = now - _PRESENCE["tick"]
+        _PRESENCE["tick"] = now
+        if _PRESENCE["present"] and 0 < dt < 10:
+            _PRESENCE["desk_seconds"] += dt
         if frame is not None:
             if _face_present(frame):
                 _PRESENCE["last_seen"] = now
             is_present = (now - _PRESENCE["last_seen"]) < 8.0   # debounce flicker
+
+            # keep a short rolling buffer of recent frames for "camera recall"
+            _CAM_RING.append((now, _cam_jpeg_b64(frame, 320, 45)))
+            if len(_CAM_RING) > 40:           # ~2 min at 3s cadence, in-memory only
+                _CAM_RING.pop(0)
 
             if is_present and not _PRESENCE["present"]:          # ── arrived ──
                 _PRESENCE["present"] = True
                 _PRESENCE["since"] = now
                 away = now - (_PRESENCE["away_since"] or now)
                 _hud_emit("presence", present=True)
+                # restore things paused while away
+                if _paused_for_away:
+                    _media_control("play"); _paused_for_away = False
+                _locked_for_away = False
                 if _PRESENCE["away_since"] and away > 120 and not _ABORT.is_set():
-                    speak("Welcome back.")
+                    mins = max(1, round(away / 60))
+                    recap = [t for ts, t in _AWAY_LOG if ts >= _PRESENCE["away_since"]]
+                    msg = f"Welcome back. You were away about {mins} minute{'s' if mins != 1 else ''}."
+                    if recap:
+                        msg += " While you were gone: " + "; ".join(recap[:4]) + "."
+                    speak(msg)
+                    _AWAY_LOG.clear()
                 else:
                     _hud_emit("toast", text="👤 you're here", level="ok")
             elif (not is_present) and _PRESENCE["present"]:      # ── left ──
                 _PRESENCE["present"] = False
                 _PRESENCE["away_since"] = now
+                _PRESENCE["away_count"] += 1
                 _hud_emit("presence", present=False)
+                if _AWAY_PAUSE:
+                    _media_control("pause"); _paused_for_away = True
 
             if _PRESENCE["present"]:
                 # break nudge after ~45 min continuous (local, free)
@@ -3878,7 +3959,40 @@ def _presence_loop() -> None:
                     last_thumb = now
                     _hud_emit("cam", img="data:image/jpeg;base64," + _cam_jpeg_b64(frame, 240, 45),
                               present=True)
+            else:
+                # locked-on-leave: after the grace period, lock the workstation once
+                if _AWAY_LOCK_SEC and not _locked_for_away and \
+                        _PRESENCE["away_since"] and now - _PRESENCE["away_since"] > _AWAY_LOCK_SEC:
+                    _locked_for_away = True
+                    try:
+                        import ctypes
+                        ctypes.windll.user32.LockWorkStation()
+                    except Exception:
+                        pass
         time.sleep(3)
+
+
+def _camera_recall(question: str) -> str:
+    """Review the recent rolling webcam frames (in-memory, local) and answer —
+    e.g. 'did anyone come to my desk while I was away?'"""
+    if not _CAM_RING:
+        return "I don't have any recent camera frames buffered yet."
+    frames = _CAM_RING[-16:]
+    n = len(frames)
+    k = min(4, n)
+    idxs = [int(i * (n - 1) / (k - 1)) for i in range(k)] if k > 1 else [n - 1]
+    b64s = [frames[i][1] for i in idxs]
+    span = max(1, int(frames[-1][0] - frames[0][0]))
+    return _gemini_vision_multi(
+        f"These are {k} webcam frames captured over the last ~{span} seconds (oldest first), "
+        f"facing the user's desk. {question}", b64s)
+
+
+def _focus_report() -> str:
+    mins = int(_PRESENCE["desk_seconds"] / 60)
+    state = "at your desk" if _PRESENCE.get("present") else "away"
+    return (f"This session you've been at your desk about {mins} minute(s), "
+            f"and stepped away {_PRESENCE['away_count']} time(s). Right now you're {state}.")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -88,6 +88,11 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
   greets you, watches your screen-time, and streams a live "what I see" thumbnail
   to the HUD. On demand it uses Gemini vision — "what am I holding?", "how do I
   look?", posture checks. (`look_through_webcam`, `check_posture`, `presence_mode`.)
+  It also gives a **"while you were away" recap** when you return, can **pause
+  your media / lock the PC** when you step away (opt-in), tracks **focus stats**
+  (`focus_report`), and does **camera recall** — "did anyone come to my desk
+  while I was away?" — by reviewing the last couple minutes of frames it keeps
+  in memory (`camera_recall`).
 - **Phone control (Telegram)** — message Jarvis from anywhere and it runs the
   command on your PC, replying with the result (and `/screenshot` sends back a
   live screen grab). Same brain and tools as voice, locked to your chat only.
