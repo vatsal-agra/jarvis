@@ -1723,6 +1723,25 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "take_photo",
+            "description": "Snap a photo from the webcam and save it. Use for 'take a photo / picture of me'.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Optional save path; defaults to Pictures."}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_qr",
+            "description": "Read a QR code the user holds up to the webcam (decodes locally). If it's a URL you can then open it.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -2308,6 +2327,13 @@ def execute_tool(name: str, args: dict) -> str:
         return _camera_recall(args.get("question", "What happened recently?"))
     elif name == "focus_report":
         return _focus_report()
+    elif name == "take_photo":
+        path, err = _cam_photo(args.get("path", ""))
+        return f"Saved a photo to {path}." if path else f"Couldn't take a photo: {err}"
+    elif name == "scan_qr":
+        _hud_emit("toast", text="📷 scanning QR…", level="info")
+        data = _scan_qr()
+        return f"QR code: {data}" if data else "I didn't see a QR code — hold it steady, facing the webcam."
 
     # ── self-authored skills ────────────────────────────────────────────────────
     elif name in _SKILLS:
@@ -2370,6 +2396,8 @@ See the user via their webcam           → look_through_webcam
 Check the user's sitting posture        → check_posture
 Recall recent webcam events             → camera_recall
 How long at desk / focus stats          → focus_report
+Take a photo with the webcam            → take_photo
+Read a QR code shown to the webcam      → scan_qr
 
 ━━ YOU CAN SEE THE USER ━━
 A webcam faces the user. look_through_webcam lets you SEE them — use it for "what
@@ -3779,6 +3807,7 @@ _POSTURE_EVERY = int(os.environ.get("JARVIS_POSTURE_MINUTES", "0") or 0)
 # Away-actions (opt-in): pause media when you leave / resume on return; lock the PC
 _AWAY_PAUSE = os.environ.get("JARVIS_AWAY_PAUSE", "0") != "0"
 _AWAY_LOCK_SEC = int(os.environ.get("JARVIS_AWAY_LOCK_SECONDS", "0") or 0)   # 0 = never
+_AWAY_ALERT = os.environ.get("JARVIS_AWAY_ALERT", "0") != "0"   # ping phone on desk movement while away
 _AWAY_LOG = []        # notable events while you're away → recapped on return
 _CAM_RING = []        # in-memory ring of recent (ts, jpeg_b64) for camera recall (local only)
 _paused_for_away = False
@@ -3912,6 +3941,15 @@ def _presence_loop() -> None:
                 _CAM_RING.pop(0)
 
             if is_present and not _PRESENCE["present"]:          # ── arrived ──
+                # If you were away a while and movement appears, optionally ping your phone.
+                if _AWAY_ALERT and JARVIS_TG_TOKEN and JARVIS_TG_CHAT and \
+                        _PRESENCE["away_since"] and now - _PRESENCE["away_since"] > 300:
+                    try:
+                        p, err = _cam_photo(os.path.join(tempfile.gettempdir(), "jarvis_alert.jpg"))
+                        if p:
+                            _tg_send_photo(p, caption="👀 Movement detected at your desk.")
+                    except Exception:
+                        pass
                 _PRESENCE["present"] = True
                 _PRESENCE["since"] = now
                 away = now - (_PRESENCE["away_since"] or now)
@@ -3995,6 +4033,41 @@ def _focus_report() -> str:
             f"and stepped away {_PRESENCE['away_count']} time(s). Right now you're {state}.")
 
 
+def _cam_photo(path: str = "") -> tuple:
+    """Capture a still from the webcam to disk. Returns (path, error)."""
+    frame = _cam_frame()
+    if frame is None:
+        return "", "no webcam frame"
+    import cv2
+    if not path:
+        pics = os.path.join(os.path.expanduser("~"), "Pictures")
+        path = os.path.join(pics if os.path.isdir(pics) else tempfile.gettempdir(),
+                            "jarvis_photo.jpg")
+    else:
+        path = os.path.expanduser(path.strip().strip('"'))
+    try:
+        cv2.imwrite(path, frame)
+        return path, ""
+    except Exception as e:
+        return "", str(e)
+
+
+def _scan_qr() -> str:
+    """Decode a QR code held up to the webcam (local, free via OpenCV)."""
+    import cv2
+    for _ in range(6):                 # a few tries to let the user position it
+        frame = _cam_frame()
+        if frame is not None:
+            try:
+                data, _pts, _ = cv2.QRCodeDetector().detectAndDecode(frame)
+                if data:
+                    return data
+            except Exception:
+                pass
+        time.sleep(0.4)
+    return ""
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  TELEGRAM BRIDGE  ─  command Jarvis from your phone, anywhere
 #  Free (Telegram Bot API). Runs the SAME brain + tools as voice, but over
@@ -4040,7 +4113,18 @@ def _tg_handle(text: str, chat_id: str) -> None:
     low = text.lower().strip()
     if low in ("/start", "/help"):
         _tg_send("Jarvis here. Send me any command and I'll run it on your PC.\n"
-                 "/screenshot — see my screen   /stop — abort the current task", chat_id)
+                 "/screenshot — my screen   /see — webcam   /stop — abort", chat_id)
+        return
+    if low.startswith("/see") or low.startswith("/webcam"):
+        try:
+            p, err = _cam_photo(os.path.join(tempfile.gettempdir(), "jarvis_see.jpg"))
+            if p:
+                _tg_send_photo(p, chat_id, "Live webcam")
+                os.unlink(p)
+            else:
+                _tg_send(f"Couldn't access the webcam: {err}", chat_id)
+        except Exception as e:
+            _tg_send(f"Webcam error: {e}", chat_id)
         return
     if low.startswith("/stop"):
         _ABORT.set()

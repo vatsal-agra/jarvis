@@ -148,7 +148,9 @@ Control Jarvis from your phone via a Telegram bot:
    `JARVIS_TELEGRAM_CHAT_ID=<id>` to `.env` and restart.
 
 Now texting the bot runs commands on your PC (it's locked to your chat id only).
-`/screenshot` sends back your screen; `/stop` aborts the current task.
+`/screenshot` sends back your screen, `/see` sends a live **webcam** photo, and
+`/stop` aborts the current task. With `JARVIS_AWAY_ALERT=1`, Jarvis can text you
+a webcam photo when it detects movement at your desk while you're away.
 
 ### Run
 
