@@ -1742,6 +1742,60 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_task",
+            "description": (
+                "Schedule a command to run LATER, automatically, through your full tools — "
+                "either once after a delay, or every day at a set time. Jarvis runs it on its "
+                "own and notifies the user (voice + phone). Use for 'every morning at 8…', "
+                "'in 2 hours, …', 'remind+do X later'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The natural-language command to run when it fires."},
+                    "delay_seconds": {"type": "integer", "description": "For a one-shot: seconds from now."},
+                    "at_time": {"type": "string", "description": "Clock time 'HH:MM' (24h) for a timed/daily task."},
+                    "daily": {"type": "boolean", "description": "true = repeat every day at at_time."}
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_scheduled",
+            "description": "List the user's scheduled/automated tasks.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_scheduled",
+            "description": "Cancel a scheduled task by its number (from list_scheduled).",
+            "parameters": {
+                "type": "object",
+                "properties": {"index": {"type": "integer", "description": "0-based index from list_scheduled."}},
+                "required": ["index"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "notify_phone",
+            "description": "Push a message to the user's phone via Telegram (use to proactively tell them something when they may be away).",
+            "parameters": {
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            },
+        },
+    },
 ]
 
 
@@ -2334,6 +2388,35 @@ def execute_tool(name: str, args: dict) -> str:
         _hud_emit("toast", text="📷 scanning QR…", level="info")
         data = _scan_qr()
         return f"QR code: {data}" if data else "I didn't see a QR code — hold it steady, facing the webcam."
+    elif name == "schedule_task":
+        return _schedule_task(args.get("command", ""), args.get("delay_seconds", 0),
+                              args.get("at_time", ""), bool(args.get("daily", False)))
+    elif name == "list_scheduled":
+        with _SCHED_LOCK:
+            if not _SCHEDULE:
+                return "You have no scheduled tasks."
+            out = []
+            for i, it in enumerate(_SCHEDULE):
+                when = (f"daily {it['time']}" if it.get("daily") else it.get("time")) if it.get("time") \
+                       else "once soon"
+                out.append(f"[{i}] {it.get('command','')[:50]} — {when}")
+        return "Scheduled tasks:\n" + "\n".join(out)
+    elif name == "cancel_scheduled":
+        try:
+            i = int(args.get("index", -1))
+        except Exception:
+            i = -1
+        with _SCHED_LOCK:
+            if 0 <= i < len(_SCHEDULE):
+                gone = _SCHEDULE.pop(i); _sched_save()
+                return f"Cancelled: {gone.get('command','')[:50]}"
+        return "No task at that number."
+    elif name == "notify_phone":
+        m_txt = args.get("message", "")
+        if not (JARVIS_TG_TOKEN and JARVIS_TG_CHAT):
+            return "Phone isn't linked (set up the Telegram bot first)."
+        _tg_send("🔔 " + m_txt)
+        return "Sent to your phone."
 
     # ── self-authored skills ────────────────────────────────────────────────────
     elif name in _SKILLS:
@@ -2398,6 +2481,8 @@ Recall recent webcam events             → camera_recall
 How long at desk / focus stats          → focus_report
 Take a photo with the webcam            → take_photo
 Read a QR code shown to the webcam      → scan_qr
+Do something later / every day          → schedule_task (list_scheduled, cancel_scheduled)
+Push a message to the user's phone       → notify_phone
 
 ━━ YOU CAN SEE THE USER ━━
 A webcam faces the user. look_through_webcam lets you SEE them — use it for "what
@@ -2700,6 +2785,16 @@ def _gemini_vision_multi(prompt: str, b64s: list, mime: str = "image/jpeg") -> s
     return (msg.get("content") or "").strip() or "(no description returned)"
 
 
+def _gemini_transcribe(audio_b64: str, fmt: str = "wav") -> str:
+    """Transcribe audio with Gemini (free tier supports audio input). fmt is the
+    container, e.g. 'wav' or 'mp3'. Returns the spoken words."""
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Transcribe this audio to text exactly. Output only the spoken words."},
+        {"type": "input_audio", "input_audio": {"data": audio_b64, "format": fmt}},
+    ]}]
+    return (_gemini_request(messages, None, 0.1).get("content") or "").strip()
+
+
 def _grab_screen_b64(max_w: int = 1280):
     """Capture the desktop, downscale, and return (base64_jpeg, mime)."""
     from PIL import ImageGrab
@@ -2991,7 +3086,7 @@ def _reminder_loop() -> None:
             _hud_emit("toast", text=f"⏰ {r['text']}", level="warn")
             _away_note(f"a reminder fired ({r['text']})")
             try:
-                speak(f"Reminder: {r['text']}")
+                _notify(f"Reminder: {r['text']}")   # speak + push to phone
             except Exception:
                 pass
         time.sleep(3)
@@ -4108,6 +4203,57 @@ def _tg_send_photo(path: str, chat_id=None, caption: str = ""):
         pass
 
 
+def _notify(text: str, speak_it: bool = True, to_phone: bool = True) -> None:
+    """Tell the user something — out loud and (if configured) pushed to their phone."""
+    if speak_it:
+        try:
+            speak(text)
+        except Exception:
+            pass
+    if to_phone and JARVIS_TG_TOKEN and JARVIS_TG_CHAT:
+        _tg_send("🔔 " + text)
+
+
+def _tg_voice_to_text(file_id: str) -> str:
+    """Download a Telegram voice note (.oga / Opus), convert to wav via ffmpeg,
+    and transcribe with Gemini. Returns the text (or '')."""
+    try:
+        fp = (_tg_call("getFile", file_id=file_id).get("result") or {}).get("file_path")
+        if not fp:
+            return ""
+        data = requests.get(f"https://api.telegram.org/file/bot{JARVIS_TG_TOKEN}/{fp}", timeout=60).content
+        src = tempfile.NamedTemporaryFile(delete=False, suffix=".oga")
+        src.write(data); src.close()
+        wav = src.name + ".wav"
+        try:
+            subprocess.run(["ffmpeg", "-y", "-i", src.name, "-ar", "16000", "-ac", "1", wav],
+                           capture_output=True, timeout=40)
+            with open(wav, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            return _gemini_transcribe(b64, "wav")
+        finally:
+            for p in (src.name, wav):
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+    except Exception:
+        return ""
+
+
+def _tg_message(text: str, voice, chat_id: str) -> None:
+    """Resolve a phone message (transcribing a voice note if needed), then run it."""
+    if voice and not text:
+        _tg_send("🎙 transcribing…", chat_id)
+        text = _tg_voice_to_text(voice.get("file_id", ""))
+        if not text:
+            _tg_send("Sorry, I couldn't understand that voice note.", chat_id)
+            return
+        _tg_send(f"🎙 heard: “{text}”", chat_id)
+    if text:
+        _tg_handle(text, chat_id)
+
+
 def _tg_handle(text: str, chat_id: str) -> None:
     """Handle one authorized phone message (runs in its own thread)."""
     low = text.lower().strip()
@@ -4171,7 +4317,8 @@ def _telegram_loop() -> None:
             msg = upd.get("message") or upd.get("edited_message") or {}
             chat_id = str((msg.get("chat") or {}).get("id", ""))
             text = (msg.get("text") or "").strip()
-            if not text or not chat_id:
+            voice = msg.get("voice") or msg.get("audio")
+            if not chat_id or (not text and not voice):
                 continue
             if not JARVIS_TG_CHAT:                       # not yet authorized — help them set it
                 _tg_send(f"Your chat id is {chat_id}.\nAdd  JARVIS_TELEGRAM_CHAT_ID={chat_id}  "
@@ -4179,7 +4326,80 @@ def _telegram_loop() -> None:
                 continue
             if chat_id != JARVIS_TG_CHAT:                # ignore everyone except you
                 continue
-            threading.Thread(target=_tg_handle, args=(text, chat_id), daemon=True).start()
+            threading.Thread(target=_tg_message, args=(text, voice, chat_id), daemon=True).start()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  SCHEDULER  ─  run commands later / on a daily schedule, autonomously
+#  One-shot ("in 2 hours…") or daily ("every day at 08:00…"). When a task fires
+#  Jarvis runs it through the full brain + tools and notifies you (voice + phone).
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_SCHED_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_schedule.json")
+_SCHEDULE = []
+_SCHED_LOCK = threading.Lock()
+
+
+def _sched_load():
+    global _SCHEDULE
+    try:
+        with open(_SCHED_PATH, encoding="utf-8") as f:
+            _SCHEDULE = json.load(f)
+    except Exception:
+        _SCHEDULE = []
+
+
+def _sched_save():
+    try:
+        with open(_SCHED_PATH, "w", encoding="utf-8") as f:
+            json.dump(_SCHEDULE, f)
+    except Exception:
+        pass
+
+
+def _schedule_task(command: str, delay_seconds: int = 0, at_time: str = "", daily: bool = False) -> str:
+    item = {"command": command}
+    if at_time:
+        item.update({"time": at_time.strip(), "daily": bool(daily), "last": ""})
+        when = f"every day at {at_time}" if daily else f"at {at_time}"
+    else:
+        item["at"] = time.time() + max(5, int(delay_seconds or 0))
+        when = f"in about {max(1, round((delay_seconds or 0) / 60))} minute(s)"
+    with _SCHED_LOCK:
+        _SCHEDULE.append(item)
+        _sched_save()
+    _hud_emit("toast", text="🗓 scheduled", level="ok")
+    return f"Scheduled: \"{command}\" {when}."
+
+
+def _schedule_loop():
+    while True:
+        now = time.time()
+        hhmm = datetime.datetime.now().strftime("%H:%M")
+        today = datetime.date.today().isoformat()
+        due = []
+        with _SCHED_LOCK:
+            keep = []
+            for it in _SCHEDULE:
+                if "at" in it:
+                    (due if it["at"] <= now else keep).append(it)
+                elif it.get("time") == hhmm and it.get("last") != today:
+                    it["last"] = today
+                    due.append(it); keep.append(it)        # daily → stays
+                else:
+                    keep.append(it)
+            if len(keep) != len(_SCHEDULE) or due:
+                _SCHEDULE[:] = keep
+                _sched_save()
+        for it in due:
+            cmd = it.get("command", "")
+            try:
+                _notify(f"Running your scheduled task: {cmd}", speak_it=False)
+                with _BRAIN_LOCK:
+                    resp, _ = process_command(cmd, [])
+                _notify(f"Scheduled task done — {cmd[:50]}: {str(resp)[:300]}")
+            except Exception as e:
+                _notify(f"Scheduled task failed ({cmd[:40]}): {e}", speak_it=False)
+        time.sleep(15)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4251,6 +4471,10 @@ if __name__ == "__main__":
     threading.Thread(target=_watch_loop, daemon=True).start()      # proactive screen-watch (off until enabled)
     if JARVIS_TG_TOKEN:
         threading.Thread(target=_telegram_loop, daemon=True).start()   # phone control via Telegram
+    _sched_load()
+    threading.Thread(target=_schedule_loop, daemon=True).start()       # scheduled automations
+    if _SCHEDULE:
+        print(f"Scheduler: {len(_SCHEDULE)} task(s) loaded.")
     if _PRESENCE["on"]:
         threading.Thread(target=_presence_loop, daemon=True).start()   # webcam visual presence (local)
         print(f"📷 Visual presence ON (camera index {JARVIS_CAM_INDEX}) — local face detection, "

@@ -11,6 +11,7 @@ jarvis_memory.json
 jarvis_reminders.json
 jarvis_routines.json
 jarvis_usage.json
+jarvis_schedule.json
 jarvis_skills/
 
 # ── Local Chrome profile / login session (cookies, tokens) ────────────────

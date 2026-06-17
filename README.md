@@ -93,9 +93,15 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
   (`focus_report`), and does **camera recall** — "did anyone come to my desk
   while I was away?" — by reviewing the last couple minutes of frames it keeps
   in memory (`camera_recall`).
-- **Phone control (Telegram)** — message Jarvis from anywhere and it runs the
-  command on your PC, replying with the result (and `/screenshot` sends back a
-  live screen grab). Same brain and tools as voice, locked to your chat only.
+- **Phone control (Telegram)** — message **or send a voice note** to Jarvis from
+  anywhere and it runs the command on your PC, replying with the result
+  (`/screenshot` = screen, `/see` = webcam). Voice notes are transcribed with
+  Gemini. Same brain and tools as voice, locked to your chat only.
+- **Pushes to your phone** — Jarvis texts *you* when things happen: reminders,
+  finished scheduled tasks, desk-movement alerts, or anything via `notify_phone`.
+- **Scheduled automations** — "every morning at 8, brief me" / "in 2 hours, do
+  X": it runs the command autonomously later and pings you with the result
+  (`schedule_task`, `list_scheduled`, `cancel_scheduled`).
 - **Interrupt anytime** — press **ESC** to stop the current task mid-action.
 - **Live HUD** — a cinematic web dashboard (zero extra dependencies, served from
   Python over Server-Sent Events) that visualises the assistant in real time:
