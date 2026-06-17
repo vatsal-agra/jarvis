@@ -44,6 +44,7 @@ from datetime import date
 #  you stop a wrong task the moment you notice it misheard you.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _ABORT = threading.Event()
+_SPEAK_LOCK = threading.Lock()   # serialize TTS so voice/reminders/presence never overlap
 
 
 def _install_abort_hotkey() -> str:
@@ -363,32 +364,33 @@ try:
         print(f"\n🤖 Jarvis: {text}\n")
         _hud_emit("jarvis", text=text)
         _hud_emit("state", state="speaking", sub="responding")
-        spoke = False
-        if not _edge_tts_broken:
-            try:
-                import concurrent.futures
-                # Fresh thread so asyncio.run() never conflicts with Playwright's loop.
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    fname = pool.submit(lambda: asyncio.run(_tts_async(text))).result(timeout=30)
-                pygame.mixer.music.load(fname)
-                pygame.mixer.music.play()
-                _spk = 0
-                while pygame.mixer.music.get_busy():
-                    if _ABORT.is_set():           # ESC pressed → cut speech short
-                        pygame.mixer.music.stop()
-                        break
-                    _spk += 1
-                    env = 0.45 + 0.35 * abs(math.sin(_spk * 0.6)) + 0.15 * abs(math.sin(_spk * 1.9))
-                    _hud_emit("level", v=min(1.0, env))
-                    pygame.time.wait(60)
-                pygame.mixer.music.unload()
-                os.unlink(fname)
-                spoke = True
-            except Exception as e:
-                print(f"[edge-tts unavailable: {e}]\n   → switching to offline Windows voice for the rest of this session.")
-                _edge_tts_broken = True
-        if not spoke:
-            _speak_offline(text)
+        with _SPEAK_LOCK:                      # never let two voices overlap
+            spoke = False
+            if not _edge_tts_broken:
+                try:
+                    import concurrent.futures
+                    # Fresh thread so asyncio.run() never conflicts with Playwright's loop.
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        fname = pool.submit(lambda: asyncio.run(_tts_async(text))).result(timeout=30)
+                    pygame.mixer.music.load(fname)
+                    pygame.mixer.music.play()
+                    _spk = 0
+                    while pygame.mixer.music.get_busy():
+                        if _ABORT.is_set():           # ESC pressed → cut speech short
+                            pygame.mixer.music.stop()
+                            break
+                        _spk += 1
+                        env = 0.45 + 0.35 * abs(math.sin(_spk * 0.6)) + 0.15 * abs(math.sin(_spk * 1.9))
+                        _hud_emit("level", v=min(1.0, env))
+                        pygame.time.wait(60)
+                    pygame.mixer.music.unload()
+                    os.unlink(fname)
+                    spoke = True
+                except Exception as e:
+                    print(f"[edge-tts unavailable: {e}]\n   → switching to offline Windows voice for the rest of this session.")
+                    _edge_tts_broken = True
+            if not spoke:
+                _speak_offline(text)
         _hud_emit("level", v=0.0)
         _hud_emit("state", state="standby", sub="ready")
 
@@ -405,8 +407,9 @@ except ImportError:
         print(f"\n🤖 Jarvis: {text}\n")
         _hud_emit("jarvis", text=text)
         _hud_emit("state", state="speaking", sub="responding")
-        _engine.say(text)
-        _engine.runAndWait()
+        with _SPEAK_LOCK:
+            _engine.say(text)
+            _engine.runAndWait()
         _hud_emit("state", state="standby", sub="ready")
 
 
@@ -1657,6 +1660,45 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "look_through_webcam",
+            "description": (
+                "Look at the user through their WEBCAM (which faces them) and answer a question "
+                "about what it sees — what they're holding up, how they look, what they're doing, "
+                "who/what is in view. Use for 'what do you see', 'what am I holding', 'how do I "
+                "look', 'is anyone behind me'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "What to look for / answer about the webcam view."}
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_posture",
+            "description": "Use the side-facing webcam to assess the user's sitting posture and give a quick tip if they're slouching.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "presence_mode",
+            "description": "Turn the webcam presence-awareness ON or OFF (it greets you when you arrive, notices when you leave, and shows a live view on the HUD). Turning it off releases the camera.",
+            "parameters": {
+                "type": "object",
+                "properties": {"enabled": {"type": "boolean"}},
+                "required": ["enabled"],
+            },
+        },
+    },
 ]
 
 
@@ -2222,6 +2264,22 @@ def execute_tool(name: str, args: dict) -> str:
     elif name == "mission":
         return _mission(args.get("goal", ""))
 
+    # ── webcam vision ────────────────────────────────────────────────────────---
+    elif name == "look_through_webcam":
+        _hud_emit("toast", text="📷 looking at you…", level="info")
+        return _cam_vision(args.get("question", "What do you see?"))
+    elif name == "check_posture":
+        _hud_emit("toast", text="📷 checking posture…", level="info")
+        return _cam_vision("This is a side view of the user at their desk. Assess their sitting "
+                           "posture in one sentence and give a quick tip if they're slouching.")
+    elif name == "presence_mode":
+        _PRESENCE["on"] = bool(args.get("enabled", True))
+        if not _PRESENCE["on"]:
+            _cam_release()
+        _hud_emit("presence", present=_PRESENCE.get("present", False), on=_PRESENCE["on"])
+        return ("Presence awareness on — I'll keep an eye out." if _PRESENCE["on"]
+                else "Presence awareness off; camera released.")
+
     # ── self-authored skills ────────────────────────────────────────────────────
     elif name in _SKILLS:
         try:
@@ -2279,6 +2337,13 @@ Forget a stored memory                  → forget
 Control a non-browser desktop app       → computer_control
 Learn a new repeatable ability          → teach_skill
 Autonomously complete a big goal        → mission
+See the user via their webcam           → look_through_webcam
+Check the user's sitting posture        → check_posture
+
+━━ YOU CAN SEE THE USER ━━
+A webcam faces the user. look_through_webcam lets you SEE them — use it for "what
+do you see / what am I holding / how do I look / is someone behind me". You also
+sense their presence (you know when they arrive or step away). Be natural about it.
 
 ━━ SHOW YOUR PLAN ━━
 For any task with 3 or more steps, FIRST call set_plan with the ordered steps — it
@@ -3653,6 +3718,170 @@ def process_command(user_input: str, history: list) -> tuple[str, list]:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  VISUAL PRESENCE  ─  Jarvis can SEE you (webcam)
+#  Always-on awareness is LOCAL & FREE (OpenCV face/profile detection): it knows
+#  when you arrive/leave, watches your screen-time, and streams a live thumbnail
+#  to the HUD. Rich understanding (what you're holding, posture, mood) uses
+#  Gemini vision on demand, so the camera never burns quota by just watching.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+JARVIS_CAM_INDEX = int(os.environ.get("JARVIS_CAM_INDEX", "0") or 0)
+_cam = None
+_cam_lock = threading.Lock()
+_cascades = None
+_PRESENCE = {"on": os.environ.get("JARVIS_PRESENCE", "1") != "0",
+             "present": False, "since": 0.0, "last_seen": 0.0,
+             "away_since": 0.0, "last_break": 0.0}
+# Optional Gemini posture check every N minutes while present (0 = off; costs quota)
+_POSTURE_EVERY = int(os.environ.get("JARVIS_POSTURE_MINUTES", "0") or 0)
+
+
+def _cascades_load():
+    global _cascades
+    if _cascades is None:
+        try:
+            import cv2
+            H = cv2.data.haarcascades
+            _cascades = [cv2.CascadeClassifier(H + "haarcascade_frontalface_default.xml"),
+                         cv2.CascadeClassifier(H + "haarcascade_profileface.xml")]
+        except Exception:
+            _cascades = []
+    return _cascades
+
+
+def _cam_open():
+    global _cam
+    import cv2
+    if _cam is None or not _cam.isOpened():
+        _cam = cv2.VideoCapture(JARVIS_CAM_INDEX)
+        for _ in range(5):           # warm-up frames (first ones are often blank)
+            _cam.read(); time.sleep(0.05)
+    return _cam
+
+
+def _cam_release():
+    global _cam
+    try:
+        if _cam is not None:
+            _cam.release()
+    except Exception:
+        pass
+    _cam = None
+
+
+def _cam_frame():
+    """Grab a fresh BGR frame (thread-safe). Returns ndarray or None."""
+    with _cam_lock:
+        try:
+            cap = _cam_open()
+            f = None
+            for _ in range(3):       # flush buffered/stale frames → newest
+                ok, fr = cap.read()
+                if ok:
+                    f = fr
+            return f
+        except Exception:
+            return None
+
+
+def _face_present(frame) -> bool:
+    """LOCAL, free presence check — frontal + profile (both directions) for the
+    45° angle. No network, no GPU model."""
+    try:
+        import cv2
+        gray = cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+    except Exception:
+        return False
+    cs = _cascades_load()
+    if not cs:
+        return False
+    if len(cs[0].detectMultiScale(gray, 1.1, 4)) > 0:
+        return True
+    if len(cs) > 1:
+        if len(cs[1].detectMultiScale(gray, 1.1, 4)) > 0:
+            return True
+        try:
+            if len(cs[1].detectMultiScale(cv2.flip(gray, 1), 1.1, 4)) > 0:   # other profile
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _cam_jpeg_b64(frame, max_w: int = 640, q: int = 75) -> str:
+    import cv2
+    h, w = frame.shape[:2]
+    if w > max_w:
+        frame = cv2.resize(frame, (max_w, int(h * max_w / w)))
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, q])
+    return base64.b64encode(buf).decode()
+
+
+def _cam_vision(question: str) -> str:
+    frame = _cam_frame()
+    if frame is None:
+        return "I couldn't get a frame from the webcam (is it connected / set JARVIS_CAM_INDEX?)."
+    return _gemini_vision(question, _cam_jpeg_b64(frame), "image/jpeg")
+
+
+def _presence_loop() -> None:
+    """LOCAL ambient awareness — greets you on arrival, notices when you leave,
+    nudges breaks, and streams a live thumbnail to the HUD. All free."""
+    if not _cascades_load():
+        print("📷 Webcam presence disabled (OpenCV unavailable).")
+        return
+    last_thumb = 0.0
+    last_posture = time.time()
+    while True:
+        if not _PRESENCE["on"]:
+            _cam_release()
+            time.sleep(2)
+            continue
+        frame = _cam_frame()
+        now = time.time()
+        if frame is not None:
+            if _face_present(frame):
+                _PRESENCE["last_seen"] = now
+            is_present = (now - _PRESENCE["last_seen"]) < 8.0   # debounce flicker
+
+            if is_present and not _PRESENCE["present"]:          # ── arrived ──
+                _PRESENCE["present"] = True
+                _PRESENCE["since"] = now
+                away = now - (_PRESENCE["away_since"] or now)
+                _hud_emit("presence", present=True)
+                if _PRESENCE["away_since"] and away > 120 and not _ABORT.is_set():
+                    speak("Welcome back.")
+                else:
+                    _hud_emit("toast", text="👤 you're here", level="ok")
+            elif (not is_present) and _PRESENCE["present"]:      # ── left ──
+                _PRESENCE["present"] = False
+                _PRESENCE["away_since"] = now
+                _hud_emit("presence", present=False)
+
+            if _PRESENCE["present"]:
+                # break nudge after ~45 min continuous (local, free)
+                if now - _PRESENCE["since"] > 2700 and now - _PRESENCE["last_break"] > 2700:
+                    _PRESENCE["last_break"] = now
+                    speak("You've been at it for a while. Maybe stretch and hydrate.")
+                # optional Gemini posture check
+                if _POSTURE_EVERY and now - last_posture > _POSTURE_EVERY * 60:
+                    last_posture = now
+                    try:
+                        verdict = _cam_vision("Look at this side view. Is the person slouching "
+                                              "or is their posture good? Reply 'SLOUCHING: <tip>' "
+                                              "or 'GOOD'.")
+                        if verdict.upper().startswith("SLOUCH"):
+                            speak(verdict.split(":", 1)[-1].strip() or "Sit up straight.")
+                    except Exception:
+                        pass
+                # live thumbnail to HUD (~every 4s) — local only
+                if now - last_thumb > 4:
+                    last_thumb = now
+                    _hud_emit("cam", img="data:image/jpeg;base64," + _cam_jpeg_b64(frame, 240, 45),
+                              present=True)
+        time.sleep(3)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  TELEGRAM BRIDGE  ─  command Jarvis from your phone, anywhere
 #  Free (Telegram Bot API). Runs the SAME brain + tools as voice, but over
 #  chat. Locked to your chat id only. Dependency-free (raw HTTP via requests).
@@ -3824,6 +4053,10 @@ if __name__ == "__main__":
     threading.Thread(target=_watch_loop, daemon=True).start()      # proactive screen-watch (off until enabled)
     if JARVIS_TG_TOKEN:
         threading.Thread(target=_telegram_loop, daemon=True).start()   # phone control via Telegram
+    if _PRESENCE["on"]:
+        threading.Thread(target=_presence_loop, daemon=True).start()   # webcam visual presence (local)
+        print(f"📷 Visual presence ON (camera index {JARVIS_CAM_INDEX}) — local face detection, "
+              "free. Set JARVIS_CAM_INDEX or JARVIS_PRESENCE=0 to change.")
 
     print("=" * 62)
     print("  JARVIS  —  AI Assistant")

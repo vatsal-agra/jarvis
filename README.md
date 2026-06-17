@@ -83,6 +83,11 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 - **Autonomous mission mode** — give it a goal; it plans, executes, **visually
   verifies its own work**, recovers from failures, and won't stop until the goal
   is actually done.
+- **Visual presence (webcam)** — Jarvis *sees you*. An always-on, **local & free**
+  awareness (OpenCV face/profile detection) knows when you arrive or step away,
+  greets you, watches your screen-time, and streams a live "what I see" thumbnail
+  to the HUD. On demand it uses Gemini vision — "what am I holding?", "how do I
+  look?", posture checks. (`look_through_webcam`, `check_posture`, `presence_mode`.)
 - **Phone control (Telegram)** — message Jarvis from anywhere and it runs the
   command on your PC, replying with the result (and `/screenshot` sends back a
   live screen grab). Same brain and tools as voice, locked to your chat only.
@@ -106,7 +111,7 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 pip install SpeechRecognition pyaudio edge-tts pygame wikipedia \
             deep-translator pyshorteners requests ddgs \
             playwright pywinauto keyboard \
-            psutil pyperclip pypdf python-docx Pillow pyautogui
+            psutil pyperclip pypdf python-docx Pillow pyautogui opencv-python
 python -m playwright install chromium
 ```
 

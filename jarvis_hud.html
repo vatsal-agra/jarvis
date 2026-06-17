@@ -137,6 +137,17 @@ body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14p
   font-size:10px;letter-spacing:2px;color:var(--green);background:rgba(8,16,28,.8);border:1px solid rgba(52,211,153,.4);
   border-radius:30px;padding:6px 12px;box-shadow:0 0 16px rgba(52,211,153,.25)}
 .watchdot.on{display:flex;animation:blink 2s infinite}
+/* webcam presence PiP */
+.campanel{position:fixed;right:356px;bottom:70px;z-index:24;width:210px;display:none;
+  border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#05080f;
+  box-shadow:0 6px 30px rgba(0,0,0,.6),0 0 18px var(--accent-glow)}
+.campanel.show{display:block}
+.campanel img{width:100%;display:block}
+.cambadge{position:absolute;top:6px;left:8px;font-size:9px;letter-spacing:1px;color:var(--green);
+  background:rgba(0,0,0,.55);padding:2px 8px;border-radius:20px}
+.cambadge.away{color:var(--ink-dim)}
+.camlabel{position:absolute;bottom:0;left:0;right:0;font-size:8px;letter-spacing:3px;color:var(--ink-dim);
+  text-align:center;background:rgba(0,0,0,.55);padding:2px}
 
 /* boot sequence */
 #boot{position:fixed;inset:0;z-index:60;background:radial-gradient(circle at 50% 50%,#06121f,#02050a 70%);
@@ -164,6 +175,11 @@ body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14p
   <div id="md-list"></div>
 </div>
 <div class="watchdot" id="watchdot">👁 WATCHING</div>
+<div class="campanel" id="campanel">
+  <img id="camimg" alt="">
+  <div class="cambadge" id="cambadge">● PRESENT</div>
+  <div class="camlabel">JARVIS&nbsp;SEES</div>
+</div>
 <div class="cmdbar"><input id="cmd" placeholder="⌨  type a command for Jarvis…  (Enter to send)" autocomplete="off" spellcheck="false"></div>
 
 <div id="boot">
@@ -242,7 +258,8 @@ const ICONS={web_search:'🔎',open_url:'🌐',browser_navigate:'🧭',browser_s
   daily_briefing:'🌅',set_plan:'📋',complete_step:'✅',browser_scroll:'📜',browser_tab:'🗂️',
   write_file:'💾',convert_currency:'💱',media_control:'🎵',read_url:'🔗',get_crypto_price:'₿',
   define_word:'📖',convert_units:'📐',deep_research:'🔬',watch_screen:'👁️',forget:'🗑️',
-  computer_control:'🖥️',teach_skill:'🧩',mission:'🚀',default:'▸'};
+  computer_control:'🖥️',teach_skill:'🧩',mission:'🚀',look_through_webcam:'📷',check_posture:'🧘',
+  presence_mode:'👤',default:'▸'};
 
 let STATE='standby';
 let targetLevel=0.05, level=0.05, lastLevelAt=0;
@@ -319,6 +336,9 @@ function dispatch(m){switch(m.kind){
   case'memory_list':{if(typeof m.count==='number')$('#s-mem').textContent=m.count;
     const l=$('#md-list');l.innerHTML=(m.items&&m.items.length)?m.items.map(t=>`<div class="mfact">${t}</div>`).join(''):'<div class="empty">Nothing learned yet.</div>';break;}
   case'watch':$('#watchdot').classList.toggle('on',!!m.on);break;
+  case'cam':{if(m.img){$('#camimg').src=m.img;$('#campanel').classList.add('show');}break;}
+  case'presence':{const b=$('#cambadge');if(b){b.textContent=m.present?'● PRESENT':'○ AWAY';b.classList.toggle('away',!m.present);}
+    if(m.on===false)$('#campanel').classList.remove('show');break;}
   case'toast':toast(m.text,m.level);break;
   case'online':{const d=$('#conn-dot');d.classList.toggle('off',!m.up);$('#conn').textContent=m.up?'ONLINE':'OFFLINE';break;}
 }}
