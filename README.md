@@ -102,6 +102,16 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 - **Scheduled automations** — "every morning at 8, brief me" / "in 2 hours, do
   X": it runs the command autonomously later and pings you with the result
   (`schedule_task`, `list_scheduled`, `cancel_scheduled`).
+- **A 100-tool toolbox** — on top of everything above, an everyday utility belt:
+  - **Files/folders**: list, search, open, create, move, copy, rename, zip/unzip,
+    safe delete (to a trash folder), disk usage, file info
+  - **System**: system info, processes, battery, screenshot-to-file, clipboard, public IP
+  - **Text/AI**: summarise, rewrite, fix grammar, password generator, hashing,
+    base64, JSON format, word count, QR generate, describe-an-image
+  - **Free live info**: multi-day forecast, air quality, sunrise/sunset, stock
+    prices, Hacker News, GitHub repo stats, synonyms, random facts, jokes,
+    "this day in history", world clock, expand short URLs
+  - **Quick**: dice, coin flip, random number, days-until-a-date
 - **Interrupt anytime** — press **ESC** to stop the current task mid-action.
 - **Live HUD** — a cinematic web dashboard (zero extra dependencies, served from
   Python over Server-Sent Events) that visualises the assistant in real time:

@@ -1796,6 +1796,62 @@ TOOLS = [
             },
         },
     },
+] + [
+    # ── EXTENDED TOOLBOX (compact schemas) ──────────────────────────────────
+    {"type": "function", "function": {"name": n, "description": d, "parameters": {
+        "type": "object",
+        "properties": {k: ({"type": "integer", "description": k} if k in
+                           ("count", "length", "sides", "days", "top", "lo", "hi", "level")
+                           else {"type": "boolean", "description": k} if k in ("symbols",)
+                           else {"type": "string", "description": k}) for k in props},
+        "required": req}}}
+    for n, d, props, req in [
+        ("list_files", "List the files/folders in a directory.", ["path"], []),
+        ("search_files", "Search for files by name under a folder (defaults to home).", ["query", "path"], ["query"]),
+        ("open_folder", "Open a folder in Windows Explorer.", ["path"], ["path"]),
+        ("create_folder", "Create a new folder.", ["path"], ["path"]),
+        ("move_path", "Move a file or folder to a new location.", ["src", "dst"], ["src", "dst"]),
+        ("copy_path", "Copy a file or folder.", ["src", "dst"], ["src", "dst"]),
+        ("delete_path", "Delete a file/folder (safely moved to a trash folder, reversible).", ["path"], ["path"]),
+        ("rename_path", "Rename a file or folder.", ["path", "new_name"], ["path", "new_name"]),
+        ("zip_path", "Zip a file or folder.", ["path"], ["path"]),
+        ("unzip_file", "Extract a .zip archive.", ["path", "dest"], ["path"]),
+        ("disk_usage", "Report free/total disk space.", ["path"], []),
+        ("file_info", "Size and modified-date of a file/folder.", ["path"], ["path"]),
+        ("system_info", "OS, CPU, RAM and GPU summary.", [], []),
+        ("list_processes", "Top running processes by memory.", ["top"], []),
+        ("kill_process", "Close/terminate processes matching a name.", ["name"], ["name"]),
+        ("battery_status", "Battery percentage and charging state.", [], []),
+        ("screenshot_save", "Save a screenshot of the desktop to a file.", ["path"], []),
+        ("set_clipboard", "Put text onto the clipboard.", ["text"], ["text"]),
+        ("ip_info", "Your public IP address and rough location.", [], []),
+        ("summarize_text", "Summarise a block of text concisely.", ["text"], ["text"]),
+        ("rewrite_text", "Rewrite text in a given style/tone (style optional).", ["text", "style"], ["text"]),
+        ("fix_grammar", "Fix spelling and grammar in text.", ["text"], ["text"]),
+        ("generate_password", "Generate a strong random password.", ["length", "symbols"], []),
+        ("hash_text", "Hash text (md5/sha1/sha256).", ["text", "algo"], ["text"]),
+        ("base64_tool", "Base64 encode or decode text (mode=encode|decode).", ["text", "mode"], ["text"]),
+        ("format_json", "Pretty-print / validate JSON.", ["text"], ["text"]),
+        ("count_words", "Word/character/line counts for text.", ["text"], ["text"]),
+        ("qr_generate", "Make a QR-code image for a link or text.", ["data", "path"], ["data"]),
+        ("describe_image", "Describe / answer about a local image file (vision).", ["path", "question"], ["path"]),
+        ("get_forecast", "Multi-day weather forecast for a place.", ["location", "days"], ["location"]),
+        ("air_quality", "Air-quality index for a place.", ["location"], ["location"]),
+        ("sunrise_sunset", "Sunrise and sunset times for a place.", ["location"], ["location"]),
+        ("hacker_news", "Top Hacker News stories.", ["count"], []),
+        ("github_repo", "Stats for a GitHub repo (owner/name).", ["repo"], ["repo"]),
+        ("synonyms", "Synonyms for a word.", ["word"], ["word"]),
+        ("random_fact", "A random interesting fact.", [], []),
+        ("tell_joke", "Tell a random joke.", [], []),
+        ("this_day", "Notable events on this day in history.", [], []),
+        ("stock_price", "Current price of a stock ticker (e.g. AAPL).", ["symbol"], ["symbol"]),
+        ("time_in", "Current local time in a city/timezone.", ["city"], ["city"]),
+        ("roll_dice", "Roll dice (sides, count).", ["sides", "count"], []),
+        ("flip_coin", "Flip a coin.", [], []),
+        ("random_number", "Random number between lo and hi.", ["lo", "hi"], []),
+        ("days_until", "Days until/since a date (YYYY-MM-DD).", ["date"], ["date"]),
+        ("expand_url", "Resolve a shortened URL to its real destination.", ["url"], ["url"]),
+    ]
 ]
 
 
@@ -2417,6 +2473,53 @@ def execute_tool(name: str, args: dict) -> str:
             return "Phone isn't linked (set up the Telegram bot first)."
         _tg_send("🔔 " + m_txt)
         return "Sent to your phone."
+
+    # ── EXTENDED TOOLBOX dispatch ────────────────────────────────────────────────
+    elif name == "list_files":      return _list_files(args.get("path", ""))
+    elif name == "search_files":    return _search_files(args.get("query", ""), args.get("path", ""))
+    elif name == "open_folder":     return _open_folder(args.get("path", ""))
+    elif name == "create_folder":   return _create_folder(args.get("path", ""))
+    elif name == "move_path":       return _move_path(args.get("src", ""), args.get("dst", ""))
+    elif name == "copy_path":       return _copy_path(args.get("src", ""), args.get("dst", ""))
+    elif name == "delete_path":     return _delete_path(args.get("path", ""))
+    elif name == "rename_path":     return _rename_path(args.get("path", ""), args.get("new_name", ""))
+    elif name == "zip_path":        return _zip_path(args.get("path", ""))
+    elif name == "unzip_file":      return _unzip_file(args.get("path", ""), args.get("dest", ""))
+    elif name == "disk_usage":      return _disk_usage(args.get("path", ""))
+    elif name == "file_info":       return _file_info(args.get("path", ""))
+    elif name == "system_info":     return _system_info()
+    elif name == "list_processes":  return _list_processes(int(args.get("top", 10) or 10))
+    elif name == "kill_process":    return _kill_process(args.get("name", ""))
+    elif name == "battery_status":  return _battery_status()
+    elif name == "screenshot_save": return _screenshot_save(args.get("path", ""))
+    elif name == "set_clipboard":   return _set_clipboard(args.get("text", ""))
+    elif name == "ip_info":         return _ip_info()
+    elif name == "summarize_text":  return _ai_text("Summarise this concisely:", args.get("text", ""))
+    elif name == "rewrite_text":    return _ai_text(f"Rewrite this in a {args.get('style','clear, polished')} style:", args.get("text", ""))
+    elif name == "fix_grammar":     return _ai_text("Fix the spelling and grammar; return only the corrected text:", args.get("text", ""))
+    elif name == "generate_password": return _generate_password(int(args.get("length", 16) or 16), bool(args.get("symbols", True)))
+    elif name == "hash_text":       return _hash_text(args.get("text", ""), args.get("algo", "sha256"))
+    elif name == "base64_tool":     return _base64_tool(args.get("text", ""), args.get("mode", "encode"))
+    elif name == "format_json":     return _format_json(args.get("text", ""))
+    elif name == "count_words":     return _count_words(args.get("text", ""))
+    elif name == "qr_generate":     return _qr_generate(args.get("data", ""), args.get("path", ""))
+    elif name == "describe_image":  return _describe_image(args.get("path", ""), args.get("question", "Describe this image."))
+    elif name == "get_forecast":    return _get_forecast(args.get("location", ""), int(args.get("days", 3) or 3))
+    elif name == "air_quality":     return _air_quality(args.get("location", ""))
+    elif name == "sunrise_sunset":  return _sunrise_sunset(args.get("location", ""))
+    elif name == "hacker_news":     return _hacker_news(int(args.get("count", 5) or 5))
+    elif name == "github_repo":     return _github_repo(args.get("repo", ""))
+    elif name == "synonyms":        return _synonyms(args.get("word", ""))
+    elif name == "random_fact":     return _random_fact()
+    elif name == "tell_joke":       return _tell_joke()
+    elif name == "this_day":        return _this_day()
+    elif name == "stock_price":     return _stock_price(args.get("symbol", ""))
+    elif name == "time_in":         return _time_in(args.get("city", ""))
+    elif name == "roll_dice":       return _roll_dice(int(args.get("sides", 6) or 6), int(args.get("count", 1) or 1))
+    elif name == "flip_coin":       return _flip_coin()
+    elif name == "random_number":   return _random_number(int(args.get("lo", 1) or 1), int(args.get("hi", 100) or 100))
+    elif name == "days_until":      return _days_until(args.get("date", ""))
+    elif name == "expand_url":      return _expand_url(args.get("url", ""))
 
     # ── self-authored skills ────────────────────────────────────────────────────
     elif name in _SKILLS:
@@ -4403,8 +4506,531 @@ def _schedule_loop():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  STARTUP
+#  EXTENDED TOOLBOX  ─  files · system · text/AI · web · utilities · fun
+#  Local ops are free/instant; web ones use free, no-key APIs; AI ones reuse
+#  the Gemini brain. All wrapped so a failure returns a friendly string.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _xp(path: str) -> str:
+    return os.path.expanduser((path or "").strip().strip('"'))
+
+
+# ── files & folders ──────────────────────────────────────────────────────────
+def _list_files(path: str = "") -> str:
+    p = _xp(path) or os.path.expanduser("~")
+    if not os.path.isdir(p):
+        return f"Not a folder: {p}"
+    try:
+        items = sorted(os.listdir(p))
+    except Exception as e:
+        return f"Couldn't list {p}: {e}"
+    out = []
+    for it in items[:60]:
+        full = os.path.join(p, it)
+        out.append(f"  {'[dir] ' if os.path.isdir(full) else '      '}{it}")
+    extra = f"\n  …and {len(items) - 60} more" if len(items) > 60 else ""
+    return f"{p}  ({len(items)} items):\n" + "\n".join(out) + extra
+
+
+def _search_files(query: str, path: str = "") -> str:
+    root = _xp(path) or os.path.expanduser("~")
+    q = query.lower()
+    hits = []
+    for dp, dns, fns in os.walk(root):
+        if sum(s in dp.lower() for s in ("\\appdata\\", "\\node_modules\\", "\\.git\\")):
+            continue
+        for fn in fns:
+            if q in fn.lower():
+                hits.append(os.path.join(dp, fn))
+                if len(hits) >= 40:
+                    return f"Found {len(hits)}+ (showing 40):\n" + "\n".join("  " + h for h in hits)
+    return (f"Found {len(hits)}:\n" + "\n".join("  " + h for h in hits)) if hits else f"No files matching '{query}' under {root}."
+
+
+def _open_folder(path: str) -> str:
+    p = _xp(path)
+    if not os.path.exists(p):
+        return f"Path doesn't exist: {p}"
+    try:
+        os.startfile(p if os.path.isdir(p) else os.path.dirname(p))
+        return f"Opened {p} in Explorer."
+    except Exception as e:
+        return f"Couldn't open: {e}"
+
+
+def _create_folder(path: str) -> str:
+    p = _xp(path)
+    try:
+        os.makedirs(p, exist_ok=True)
+        return f"Created folder {p}."
+    except Exception as e:
+        return f"Couldn't create folder: {e}"
+
+
+def _move_path(src: str, dst: str) -> str:
+    import shutil
+    try:
+        shutil.move(_xp(src), _xp(dst))
+        return f"Moved to {_xp(dst)}."
+    except Exception as e:
+        return f"Move failed: {e}"
+
+
+def _copy_path(src: str, dst: str) -> str:
+    import shutil
+    s, d = _xp(src), _xp(dst)
+    try:
+        shutil.copytree(s, d) if os.path.isdir(s) else shutil.copy2(s, d)
+        return f"Copied to {d}."
+    except Exception as e:
+        return f"Copy failed: {e}"
+
+
+def _delete_path(path: str) -> str:
+    """Safe delete — moves to a ~/.jarvis_trash folder (reversible), never hard-deletes."""
+    import shutil
+    p = _xp(path)
+    if not os.path.exists(p):
+        return f"Path doesn't exist: {p}"
+    trash = os.path.join(os.path.expanduser("~"), ".jarvis_trash")
+    os.makedirs(trash, exist_ok=True)
+    try:
+        dest = os.path.join(trash, os.path.basename(p.rstrip("\\/")))
+        if os.path.exists(dest):
+            dest += f"_{int(_PRESENCE.get('tick', 0))}"
+        shutil.move(p, dest)
+        return f"Moved to trash ({trash}). Recover it there if needed."
+    except Exception as e:
+        return f"Delete failed: {e}"
+
+
+def _rename_path(path: str, new_name: str) -> str:
+    p = _xp(path)
+    try:
+        dest = os.path.join(os.path.dirname(p), new_name)
+        os.rename(p, dest)
+        return f"Renamed to {dest}."
+    except Exception as e:
+        return f"Rename failed: {e}"
+
+
+def _zip_path(path: str) -> str:
+    import shutil
+    p = _xp(path)
+    try:
+        base = p.rstrip("\\/")
+        out = shutil.make_archive(base, "zip", p if os.path.isdir(p) else os.path.dirname(p),
+                                  None if os.path.isdir(p) else os.path.basename(p))
+        return f"Zipped to {out}."
+    except Exception as e:
+        return f"Zip failed: {e}"
+
+
+def _unzip_file(path: str, dest: str = "") -> str:
+    import shutil
+    p = _xp(path)
+    d = _xp(dest) or os.path.splitext(p)[0]
+    try:
+        shutil.unpack_archive(p, d)
+        return f"Extracted to {d}."
+    except Exception as e:
+        return f"Unzip failed: {e}"
+
+
+def _disk_usage(path: str = "") -> str:
+    import shutil
+    p = _xp(path) or "C:\\"
+    try:
+        t, u, f = shutil.disk_usage(p)
+        gb = lambda x: round(x / 1024**3, 1)
+        return f"{p}: {gb(f)} GB free of {gb(t)} GB ({round(u/t*100)}% used)."
+    except Exception as e:
+        return f"Disk usage error: {e}"
+
+
+def _file_info(path: str) -> str:
+    p = _xp(path)
+    if not os.path.exists(p):
+        return f"Path doesn't exist: {p}"
+    st = os.stat(p)
+    when = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+    size = st.st_size
+    unit = "bytes"
+    for u in ("KB", "MB", "GB"):
+        if size >= 1024:
+            size /= 1024; unit = u
+    return f"{p}\n  {'folder' if os.path.isdir(p) else 'file'}, {round(size,1)} {unit}, modified {when}"
+
+
+# ── system ───────────────────────────────────────────────────────────────────
+def _system_info() -> str:
+    import platform
+    parts = [f"{platform.system()} {platform.release()}", f"machine {platform.machine()}"]
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        parts.append(f"CPU {psutil.cpu_count()} cores @ {round(psutil.cpu_percent())}%")
+        parts.append(f"RAM {round(vm.used/1024**3,1)}/{round(vm.total/1024**3,1)} GB")
+    except Exception:
+        pass
+    g = _gpu_stats()
+    if g:
+        parts.append(f"GPU {round(g['util'])}% , {round(g['temp'])}°C")
+    return " | ".join(parts)
+
+
+def _list_processes(top: int = 10) -> str:
+    try:
+        import psutil
+        procs = []
+        for pr in psutil.process_iter(["name", "memory_info"]):
+            try:
+                procs.append((pr.info["name"], pr.info["memory_info"].rss))
+            except Exception:
+                pass
+        procs.sort(key=lambda x: x[1], reverse=True)
+        return "Top processes by memory:\n" + "\n".join(
+            f"  {n}  —  {round(m/1024**2)} MB" for n, m in procs[:top])
+    except Exception as e:
+        return f"Process list error: {e}"
+
+
+def _kill_process(name: str) -> str:
+    try:
+        import psutil
+        killed = 0
+        for pr in psutil.process_iter(["name"]):
+            try:
+                if name.lower() in (pr.info["name"] or "").lower():
+                    pr.terminate(); killed += 1
+            except Exception:
+                pass
+        return f"Closed {killed} process(es) matching '{name}'." if killed else f"No process matching '{name}'."
+    except Exception as e:
+        return f"Kill error: {e}"
+
+
+def _battery_status() -> str:
+    try:
+        import psutil
+        b = psutil.sensors_battery()
+        if not b:
+            return "No battery detected (desktop?)."
+        plug = "charging" if b.power_plugged else "on battery"
+        left = "" if b.power_plugged or b.secsleft < 0 else f", ~{b.secsleft//3600}h{(b.secsleft%3600)//60}m left"
+        return f"Battery {round(b.percent)}% ({plug}{left})."
+    except Exception as e:
+        return f"Battery error: {e}"
+
+
+def _screenshot_save(path: str = "") -> str:
+    from PIL import ImageGrab
+    p = _xp(path) or os.path.join(os.path.expanduser("~"), "Pictures", "jarvis_screen.png")
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        ImageGrab.grab().save(p)
+        return f"Saved screenshot to {p}."
+    except Exception as e:
+        return f"Screenshot failed: {e}"
+
+
+def _set_clipboard(text: str) -> str:
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return "Copied to clipboard."
+    except Exception as e:
+        return f"Clipboard error: {e}"
+
+
+def _ip_info() -> str:
+    try:
+        d = requests.get("http://ip-api.com/json", timeout=10).json()
+        if d.get("status") != "success":
+            return "Couldn't get IP info."
+        return (f"Public IP {d.get('query')} — {d.get('city')}, {d.get('regionName')}, "
+                f"{d.get('country')} (ISP: {d.get('isp')}).")
+    except Exception as e:
+        return f"IP info error: {e}"
+
+
+# ── text / AI utilities ──────────────────────────────────────────────────────
+def _ai_text(instruction: str, text: str, temp: float = 0.3) -> str:
+    try:
+        return (_gemini_request([{"role": "user", "content": f"{instruction}\n\n{text}"}],
+                                None, temp).get("content") or "").strip()
+    except Exception as e:
+        return f"AI error: {e}"
+
+
+def _generate_password(length: int = 16, symbols: bool = True) -> str:
+    import secrets, string
+    n = max(6, min(64, int(length or 16)))
+    alpha = string.ascii_letters + string.digits + ("!@#$%^&*-_=+" if symbols else "")
+    return "Generated password: " + "".join(secrets.choice(alpha) for _ in range(n))
+
+
+def _hash_text(text: str, algo: str = "sha256") -> str:
+    import hashlib
+    algo = algo.lower()
+    if algo not in hashlib.algorithms_available:
+        algo = "sha256"
+    return f"{algo}: {hashlib.new(algo, text.encode()).hexdigest()}"
+
+
+def _base64_tool(text: str, mode: str = "encode") -> str:
+    try:
+        if mode == "decode":
+            return "Decoded: " + base64.b64decode(text).decode("utf-8", "replace")
+        return "Encoded: " + base64.b64encode(text.encode()).decode()
+    except Exception as e:
+        return f"Base64 error: {e}"
+
+
+def _format_json(text: str) -> str:
+    try:
+        return "```json\n" + json.dumps(json.loads(text), indent=2) + "\n```"
+    except Exception as e:
+        return f"Invalid JSON: {e}"
+
+
+def _count_words(text: str) -> str:
+    words = len(text.split())
+    return f"{words} words, {len(text)} characters, {len(text.splitlines()) or 1} line(s)."
+
+
+def _qr_generate(data: str, path: str = "") -> str:
+    try:
+        import cv2
+        p = _xp(path) or os.path.join(os.path.expanduser("~"), "Pictures", "jarvis_qr.png")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        img = cv2.QRCodeEncoder_create().encode(data)
+        cv2.imwrite(p, cv2.resize(img, (400, 400), interpolation=cv2.INTER_NEAREST))
+        return f"QR code saved to {p}."
+    except Exception as e:
+        return f"QR generate error: {e}"
+
+
+def _image_b64(path: str):
+    import cv2
+    img = cv2.imread(_xp(path))
+    if img is None:
+        return None
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return base64.b64encode(buf).decode()
+
+
+def _describe_image(path: str, question: str = "Describe this image.") -> str:
+    b = _image_b64(path)
+    if not b:
+        return f"Couldn't read image: {path}"
+    return _gemini_vision(question, b, "image/jpeg")
+
+
+# ── geo helper (shared) ──────────────────────────────────────────────────────
+def _geocode(location: str):
+    try:
+        g = requests.get("https://geocoding-api.open-meteo.com/v1/search",
+                         params={"name": location, "count": 1}, timeout=10).json()
+        r = (g.get("results") or [None])[0]
+        return r
+    except Exception:
+        return None
+
+
+# ── free web info ────────────────────────────────────────────────────────────
+def _get_forecast(location: str, days: int = 3) -> str:
+    r = _geocode(location)
+    if not r:
+        return f"Couldn't find '{location}'."
+    try:
+        w = requests.get("https://api.open-meteo.com/v1/forecast", params={
+            "latitude": r["latitude"], "longitude": r["longitude"],
+            "daily": "temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max",
+            "timezone": "auto", "forecast_days": max(1, min(7, days))}, timeout=10).json()
+        d = w["daily"]
+        out = [f"Forecast for {r['name']}:"]
+        for i, day in enumerate(d["time"]):
+            out.append(f"  {day}: {round(d['temperature_2m_min'][i])}–{round(d['temperature_2m_max'][i])}°C, "
+                       f"{_WMO.get(d['weather_code'][i],'?')}, {d['precipitation_probability_max'][i]}% rain")
+        return "\n".join(out)
+    except Exception as e:
+        return f"Forecast error: {e}"
+
+
+def _air_quality(location: str) -> str:
+    r = _geocode(location)
+    if not r:
+        return f"Couldn't find '{location}'."
+    try:
+        a = requests.get("https://air-quality-api.open-meteo.com/v1/air-quality", params={
+            "latitude": r["latitude"], "longitude": r["longitude"],
+            "current": "pm2_5,pm10,us_aqi", "timezone": "auto"}, timeout=10).json()["current"]
+        aqi = a.get("us_aqi")
+        rating = ("good" if aqi <= 50 else "moderate" if aqi <= 100 else "unhealthy for sensitive groups"
+                  if aqi <= 150 else "unhealthy" if aqi <= 200 else "very unhealthy") if aqi is not None else "?"
+        return f"{r['name']} air quality: AQI {aqi} ({rating}), PM2.5 {a.get('pm2_5')}, PM10 {a.get('pm10')}."
+    except Exception as e:
+        return f"Air quality error: {e}"
+
+
+def _sunrise_sunset(location: str) -> str:
+    r = _geocode(location)
+    if not r:
+        return f"Couldn't find '{location}'."
+    try:
+        s = requests.get("https://api.sunrise-sunset.org/json", params={
+            "lat": r["latitude"], "lng": r["longitude"], "formatted": 0,
+            "tzid": r.get("timezone", "UTC")}, timeout=10).json()["results"]
+        sr = s["sunrise"][11:16]; ss = s["sunset"][11:16]
+        return f"{r['name']}: sunrise {sr}, sunset {ss} (local time)."
+    except Exception as e:
+        return f"Sunrise/sunset error: {e}"
+
+
+def _hacker_news(count: int = 5) -> str:
+    try:
+        ids = requests.get("https://hacker-news.firebaseio.com/v0/topstories.json", timeout=10).json()[:max(1, min(10, count))]
+        out = []
+        for i in ids:
+            it = requests.get(f"https://hacker-news.firebaseio.com/v0/item/{i}.json", timeout=10).json()
+            out.append(f"  • {it.get('title','')} ({it.get('score',0)} pts)")
+        return "Hacker News top stories:\n" + "\n".join(out)
+    except Exception as e:
+        return f"Hacker News error: {e}"
+
+
+def _github_repo(repo: str) -> str:
+    repo = repo.strip().replace("https://github.com/", "").strip("/")
+    try:
+        d = requests.get(f"https://api.github.com/repos/{repo}", timeout=10,
+                         headers={"Accept": "application/vnd.github+json"}).json()
+        if "full_name" not in d:
+            return f"Couldn't find repo '{repo}'."
+        return (f"{d['full_name']} — {d.get('description','')}\n"
+                f"  ⭐ {d.get('stargazers_count')} stars, {d.get('forks_count')} forks, "
+                f"{d.get('open_issues_count')} open issues, language: {d.get('language')}.")
+    except Exception as e:
+        return f"GitHub error: {e}"
+
+
+def _synonyms(word: str) -> str:
+    try:
+        d = requests.get("https://api.datamuse.com/words", params={"rel_syn": word, "max": 10}, timeout=10).json()
+        syns = [x["word"] for x in d]
+        return f"Synonyms for '{word}': " + ", ".join(syns) if syns else f"No synonyms found for '{word}'."
+    except Exception as e:
+        return f"Thesaurus error: {e}"
+
+
+def _random_fact() -> str:
+    try:
+        return "Did you know? " + requests.get("https://uselessfacts.jsph.pl/api/v2/facts/random", timeout=10).json()["text"]
+    except Exception as e:
+        return f"Fact error: {e}"
+
+
+def _tell_joke() -> str:
+    try:
+        j = requests.get("https://official-joke-api.appspot.com/random_joke", timeout=10).json()
+        return f"{j['setup']} … {j['punchline']}"
+    except Exception as e:
+        return f"Joke error: {e}"
+
+
+def _this_day() -> str:
+    try:
+        d = requests.get("https://history.muffinlabs.com/date", timeout=10).json()
+        events = d["data"]["Events"][:4]
+        return f"On this day ({d['date']}):\n" + "\n".join(f"  {e['year']}: {e['text']}" for e in events)
+    except Exception as e:
+        return f"History error: {e}"
+
+
+def _stock_price(symbol: str) -> str:
+    sym = symbol.upper().strip()
+    try:
+        d = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+                         timeout=10, headers={"User-Agent": "Mozilla/5.0"}).json()
+        res = d["chart"]["result"][0]["meta"]
+        price = res.get("regularMarketPrice")
+        prev = res.get("chartPreviousClose") or res.get("previousClose")
+        cur = res.get("currency", "")
+        chg = f" ({(price-prev)/prev*100:+.1f}%)" if price and prev else ""
+        return f"{sym}: {price} {cur}{chg}."
+    except Exception:
+        return f"Couldn't get a price for '{symbol}' (try the exact ticker, e.g. AAPL, TSLA)."
+
+
+def _time_in(city: str) -> str:
+    """Local time in a city/timezone using the system tz database (no API)."""
+    zones = {"new york": "America/New_York", "london": "Europe/London", "tokyo": "Asia/Tokyo",
+             "paris": "Europe/Paris", "dubai": "Asia/Dubai", "sydney": "Australia/Sydney",
+             "los angeles": "America/Los_Angeles", "san francisco": "America/Los_Angeles",
+             "singapore": "Asia/Singapore", "berlin": "Europe/Berlin", "moscow": "Europe/Moscow",
+             "delhi": "Asia/Kolkata", "mumbai": "Asia/Kolkata", "india": "Asia/Kolkata",
+             "beijing": "Asia/Shanghai", "hong kong": "Asia/Hong_Kong", "toronto": "America/Toronto"}
+    key = city.lower().strip()
+    tz = zones.get(key, city if "/" in city else None)
+    if not tz:
+        return f"I don't know the timezone for '{city}'. Try a major city or an IANA zone like 'Asia/Tokyo'."
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.datetime.now(ZoneInfo(tz))
+        return f"Time in {city.title()}: {now.strftime('%I:%M %p, %A %d %b')}."
+    except Exception as e:
+        return f"Time lookup error: {e}"
+
+
+# ── fun / quick math (local) ─────────────────────────────────────────────────
+def _roll_dice(sides: int = 6, count: int = 1) -> str:
+    sides = max(2, min(1000, int(sides or 6)))
+    count = max(1, min(20, int(count or 1)))
+    rolls = [_random.randint(1, sides) for _ in range(count)]
+    return f"🎲 Rolled {count}d{sides}: {rolls}" + (f" (total {sum(rolls)})" if count > 1 else "")
+
+
+def _flip_coin() -> str:
+    return "🪙 " + _random.choice(["Heads", "Tails"])
+
+
+def _random_number(lo: int = 1, hi: int = 100) -> str:
+    lo, hi = int(lo), int(hi)
+    if lo > hi:
+        lo, hi = hi, lo
+    return f"🔢 {_random.randint(lo, hi)} (between {lo} and {hi})"
+
+
+def _days_until(date_str: str) -> str:
+    try:
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y"):
+            try:
+                target = datetime.datetime.strptime(date_str.strip(), fmt).date()
+                break
+            except ValueError:
+                target = None
+        if not target:
+            return f"Couldn't parse the date '{date_str}'. Try YYYY-MM-DD."
+        delta = (target - datetime.date.today()).days
+        if delta == 0:
+            return "That's today!"
+        return f"{abs(delta)} day(s) {'until' if delta > 0 else 'ago'} {target.isoformat()}."
+    except Exception as e:
+        return f"Date error: {e}"
+
+
+def _expand_url(url: str) -> str:
+    """Resolve a shortened/redirecting URL to its final destination (read-only)."""
+    if not url.startswith("http"):
+        url = "https://" + url
+    try:
+        r = requests.head(url, allow_redirects=True, timeout=10)
+        if r.url == url:
+            r = requests.get(url, allow_redirects=True, timeout=10, stream=True)
+        return f"{url}\n  → {r.url}"
+    except Exception as e:
+        return f"Couldn't expand that URL: {e}"
+
+
 def _gemini_available() -> bool:
     """True if Gemini is reachable and at least one key authenticates. A 429/503
     still counts as available (working, just busy/limited — runtime rotation
