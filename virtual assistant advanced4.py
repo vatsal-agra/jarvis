@@ -106,7 +106,6 @@ except Exception:
     ollama = None
 import requests
 import speech_recognition as sr
-import wikipedia
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -425,15 +424,21 @@ except ImportError:
 #   • Finished audio is sent to Google STT
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 import numpy as np
-import torch
+# NOTE: torch is the slow import (~9s) and is used ONLY for the Silero voice
+# detector, so we DON'T import it at module load. It's imported lazily by
+# _get_vad() and warmed in a background thread at startup — Jarvis boots in ~2s
+# and the model is ready by the time you first speak. No quality change.
 
 _recognizer = sr.Recognizer()   # kept for Google STT only
 _vad_model   = None             # loaded once at first use
+_torch       = None             # the torch module, imported lazily with the VAD
 
 
 def _get_vad():
-    global _vad_model
+    global _vad_model, _torch
     if _vad_model is None:
+        import torch as _t
+        _torch = _t
         from silero_vad import load_silero_vad
         _vad_model = load_silero_vad()
     return _vad_model
@@ -508,7 +513,7 @@ def takeCommand() -> str:
         while True:
             raw     = stream.read(CHUNK, exception_on_overflow=False)
             samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-            prob    = model(torch.from_numpy(samples), RATE).item()
+            prob    = model(_torch.from_numpy(samples), RATE).item()
 
             rms = float(np.sqrt(np.mean(samples * samples)))
             peak_prob = max(peak_prob, prob)
@@ -2145,6 +2150,7 @@ def execute_tool(name: str, args: dict) -> str:
     elif name == "wikipedia_search":
         topic = args.get("topic", "")
         try:
+            import wikipedia
             summary = wikipedia.summary(topic, sentences=3)
             return summary
         except wikipedia.exceptions.DisambiguationError as e:
@@ -5075,6 +5081,10 @@ if __name__ == "__main__":
         except Exception:
             pass
     _hud_emit("state", state="standby", sub="booting")
+
+    # Warm the voice detector (torch + Silero) in the background so startup stays
+    # fast (~2s) while the model loads during the greeting — ready by first listen.
+    threading.Thread(target=_get_vad, daemon=True).start()
 
     _mem_load()   # load long-term memory from disk
     if _MEM:
