@@ -160,6 +160,8 @@ def _hud_quota() -> None:
 # out when a genuinely new quota day begins.
 _USAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_usage.json")
 _USAGE_DATE = None
+_USAGE_LOCK = threading.Lock()   # guards the quota counter + jarvis_usage.json writes
+                                 # (proactive vision loops hit Gemini outside _BRAIN_LOCK)
 
 
 def _pacific_date() -> str:
@@ -197,9 +199,10 @@ def _usage_rollover() -> None:
     global _USAGE_DATE
     today = _pacific_date()
     if _USAGE_DATE != today:
-        _USAGE_DATE = today
-        _GEMINI_USAGE.clear()
-        _usage_save()
+        with _USAGE_LOCK:
+            _USAGE_DATE = today
+            _GEMINI_USAGE.clear()
+            _usage_save()
 
 
 def _tool_summary(name: str, args: dict) -> str:
@@ -600,6 +603,7 @@ def takeCommand() -> str:
 _pw_instance  = None
 _pw_browser   = None   # CDP-connected browser object
 _pw_page      = None
+_pw_known_pages = 0    # how many tabs we last saw — to detect a NEW popup tab
 _jarvis_proc  = None   # subprocess handle for the Jarvis Chrome process
 
 JARVIS_CHROME_PROFILE = os.path.join(os.path.expanduser("~"), ".jarvis_chrome_profile")
@@ -720,7 +724,7 @@ def _launch_jarvis_chrome():
 
 def _get_page():
     """Return active Playwright page, launching Jarvis Chrome if needed."""
-    global _pw_page, _pw_browser
+    global _pw_page, _pw_browser, _pw_known_pages
     _ensure_playwright()
 
     # Check if existing page is still alive
@@ -732,13 +736,16 @@ def _get_page():
         if closed:
             _pw_page = None  # discard stale reference so relaunch triggers below
         else:
-            # Follow to the most recent tab if a popup opened
+            # Follow a popup ONLY when a NEW tab actually appeared (count grew).
+            # Don't blindly jump to the last tab every call — that used to silently
+            # undo an explicit browser_tab switch.
             if _pw_browser:
                 try:
-                    for ctx in _pw_browser.contexts:
-                        pages = [p for p in ctx.pages if not p.is_closed()]
-                        if pages and pages[-1] != _pw_page:
-                            _pw_page = pages[-1]
+                    live = [p for ctx in _pw_browser.contexts for p in ctx.pages
+                            if not p.is_closed()]
+                    if live and len(live) > _pw_known_pages:
+                        _pw_page = live[-1]      # a popup/new tab opened → follow it
+                    _pw_known_pages = len(live)
                 except Exception:
                     pass
             return _pw_page
@@ -1877,8 +1884,16 @@ GAME_FILES = {
 
 
 def execute_tool(name: str, args: dict) -> str:
+    """Thin wrapper so NO tool can ever crash the agent loop — any unexpected
+    exception (bad numeric arg, permission error, etc.) becomes a friendly string."""
     print(f"⚙  Tool → {name}({args})")
+    try:
+        return _execute_tool_impl(name, args or {})
+    except Exception as e:
+        return f"Tool '{name}' hit an error: {e}"
 
+
+def _execute_tool_impl(name: str, args: dict) -> str:
     # ── open_url ──────────────────────────────────────────────────────────────
     if name == "open_url":
         url = args.get("url", "").strip()
@@ -2104,47 +2119,51 @@ def execute_tool(name: str, args: dict) -> str:
         action   = args.get("action", "")
         element  = args.get("element", "")
         text     = args.get("text", "")
-        try:
-            from pywinauto import Application, Desktop
-            from pywinauto.keyboard import send_keys
 
-            if action == "focus":
-                wins = Desktop(backend="uia").windows(title_re=f".*{app_name}.*")
-                if wins:
-                    wins[0].set_focus()
-                    return f"Focused: {wins[0].window_text()}"
-                return f"No window found matching '{app_name}'"
+        # pywinauto/comtypes must run in a dedicated COM-initialised thread, or it
+        # crashes with "Cannot change thread mode" because pygame already set the
+        # main thread's COM apartment (same fix as _desktop_marks_data).
+        out = {}
 
-            elif action == "click":
-                app = Application(backend="uia").connect(
-                    title_re=f".*{app_name}.*", timeout=5
-                )
-                win = app.top_window()
-                win.child_window(title=element, control_type="Button").click_input()
-                return f"Clicked '{element}' in {app_name}"
-
-            elif action == "type":
-                app = Application(backend="uia").connect(
-                    title_re=f".*{app_name}.*", timeout=5
-                )
-                win = app.top_window()
-                win.set_focus()
-                if element:
-                    ctrl = win.child_window(title=element)
-                    ctrl.set_edit_text(text)
+        def _work():
+            try:
+                try:
+                    import comtypes
+                    comtypes.CoInitialize()
+                except Exception:
+                    pass
+                from pywinauto import Application, Desktop
+                from pywinauto.keyboard import send_keys
+                if action == "focus":
+                    wins = Desktop(backend="uia").windows(title_re=f".*{app_name}.*")
+                    if wins:
+                        wins[0].set_focus()
+                        out["r"] = f"Focused: {wins[0].window_text()}"
+                    else:
+                        out["r"] = f"No window found matching '{app_name}'"
+                elif action == "click":
+                    app = Application(backend="uia").connect(title_re=f".*{app_name}.*", timeout=5)
+                    app.top_window().child_window(title=element, control_type="Button").click_input()
+                    out["r"] = f"Clicked '{element}' in {app_name}"
+                elif action == "type":
+                    app = Application(backend="uia").connect(title_re=f".*{app_name}.*", timeout=5)
+                    win = app.top_window(); win.set_focus()
+                    if element:
+                        win.child_window(title=element).set_edit_text(text)
+                    else:
+                        send_keys(text, with_spaces=True)
+                    out["r"] = f"Typed in {app_name}"
+                elif action == "get_text":
+                    app = Application(backend="uia").connect(title_re=f".*{app_name}.*", timeout=5)
+                    out["r"] = app.top_window().window_text()[:500]
                 else:
-                    send_keys(text, with_spaces=True)
-                return f"Typed in {app_name}"
+                    out["r"] = f"Unknown action '{action}'"
+            except Exception as e:
+                out["r"] = f"Windows control error: {e}"
 
-            elif action == "get_text":
-                app = Application(backend="uia").connect(
-                    title_re=f".*{app_name}.*", timeout=5
-                )
-                return app.top_window().window_text()[:500]
-
-            return f"Unknown action '{action}'"
-        except Exception as e:
-            return f"Windows control error: {e}"
+        t = threading.Thread(target=_work, daemon=True)
+        t.start(); t.join(timeout=20)
+        return out.get("r", "Windows control timed out.")
 
     # ── wikipedia_search ──────────────────────────────────────────────────────
     elif name == "wikipedia_search":
@@ -2832,12 +2851,18 @@ def _gemini_request(messages, tools, temperature) -> dict:
                             json=body, timeout=60,
                         )
                     except Exception as e:
-                        raise RuntimeError(f"network error: {e}")  # offline → fall back now
+                        # Transient network blip — don't kill the turn. Note it and let
+                        # the loop retry / rotate; we only raise if EVERYTHING fails.
+                        last_err = f"network error: {e}"
+                        soft_only = False
+                        time.sleep(1)
+                        continue
                     if r.status_code == 200:
-                        _gemini_key_idx = idx          # remember the working key
-                        _gemini_last_model = model     # …and the model that served it
-                        _GEMINI_USAGE[(idx, model)] = _GEMINI_USAGE.get((idx, model), 0) + 1
-                        _usage_save()
+                        with _USAGE_LOCK:
+                            _gemini_key_idx = idx          # remember the working key
+                            _gemini_last_model = model     # …and the model that served it
+                            _GEMINI_USAGE[(idx, model)] = _GEMINI_USAGE.get((idx, model), 0) + 1
+                            _usage_save()
                         _hud_quota()
                         return r.json()["choices"][0]["message"]
                     if r.status_code == 503:
@@ -2849,8 +2874,9 @@ def _gemini_request(messages, tools, temperature) -> dict:
                         # transient PER-MINUTE throttle (clears in ~seconds). Only the
                         # daily case should mark the key "full" on the quota meter.
                         if "perday" in r.text.lower().replace(" ", ""):
-                            _GEMINI_USAGE[(idx, model)] = 20   # genuinely tapped out today
-                            _usage_save()
+                            with _USAGE_LOCK:
+                                _GEMINI_USAGE[(idx, model)] = 20   # genuinely tapped out today
+                                _usage_save()
                             _hud_quota()
                             last_err = f"429 daily-limit (key {idx + 1}, {model})"
                         else:
@@ -2992,12 +3018,14 @@ def _gemini_embed(texts):
                 json=body, timeout=30,
             )
         except Exception:
-            return []
+            continue          # transient network blip on this key — try the next
         if r.status_code == 200:
-            return [d["embedding"] for d in r.json()["data"]]
-        if r.status_code == 429:
-            continue          # this key's embed quota is spent — try the next
-        return []             # other error — give up quietly
+            try:
+                return [d["embedding"] for d in r.json()["data"]]
+            except Exception:
+                continue
+        # 429 (quota) or any other error — rotate to the next key rather than give up
+        continue
     return []
 
 
@@ -3034,6 +3062,7 @@ def _mem_add(fact: str) -> bool:
     for m in _MEM:                               # de-dupe very similar facts
         if m.get("vec") and _cosine(vec, m["vec"]) > 0.95:
             m["text"], m["vec"] = fact, vec
+            m["ts"] = datetime.datetime.now().isoformat(timespec="seconds")
             _mem_save()
             _emit_memory_list()
             return True
@@ -3352,9 +3381,10 @@ def _routine_loop() -> None:
             except Exception:
                 routines = []
             hhmm = now.strftime("%H:%M")
-            for i, r in enumerate(routines):
-                if r.get("time") == hhmm and i not in fired_today:
-                    fired_today.add(i)
+            for r in routines:
+                key = (r.get("time"), r.get("location", ""), r.get("topic", ""))  # stable id, not list index
+                if r.get("time") == hhmm and key not in fired_today:
+                    fired_today.add(key)
                     _hud_emit("toast", text="🌅 daily briefing", level="info")
                     speak(_compose_briefing(r.get("location", ""), r.get("topic", "")))
         except Exception:
@@ -4049,12 +4079,13 @@ def _cam_open():
 
 def _cam_release():
     global _cam
-    try:
-        if _cam is not None:
-            _cam.release()
-    except Exception:
-        pass
-    _cam = None
+    with _cam_lock:          # don't release while another thread is mid-read
+        try:
+            if _cam is not None:
+                _cam.release()
+        except Exception:
+            pass
+        _cam = None
 
 
 def _cam_frame():
@@ -4417,7 +4448,9 @@ def _telegram_loop() -> None:
           + ("" if JARVIS_TG_CHAT else "  (message it once to get your chat id)"))
     offset = 0
     while True:
-        resp = _tg_call("getUpdates", offset=offset, timeout=60)
+        # server long-poll 50s, HTTP client 70s → comfortable margin so a normal
+        # long-poll doesn't time out the request and churn-reconnect.
+        resp = _tg_call("getUpdates", offset=offset, timeout=50)
         if not resp.get("ok"):
             time.sleep(3)
             continue
@@ -5189,6 +5222,7 @@ if __name__ == "__main__":
             speak("Goodbye!")
             _hud_emit("toast", text="Jarvis signing off", level="info")
             _hud_emit("state", state="standby", sub="offline")
+            _cam_release()        # free the webcam on the way out
             try:
                 if _pw_instance:
                     _pw_instance.stop()
