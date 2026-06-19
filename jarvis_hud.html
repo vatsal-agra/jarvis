@@ -274,14 +274,15 @@ function setState(st,sub){
 
 /* ── transcript / actions / brain / quota / toast ────────────────── */
 let tasks=0,tools=0,tc=0,ac=0;
+function cap(box,n){while(box.children.length>n)box.removeChild(box.firstChild);}  // keep an always-on dashboard from leaking DOM over hours
 function addMsg(who,text){const box=$('#transcript');const e=box.querySelector('.empty');if(e)e.remove();
   const d=document.createElement('div');d.className='msg '+(who==='you'?'you':'jar');
   d.innerHTML=`<div class="who">${who==='you'?'YOU':'JARVIS'}</div><div class="body"></div>`;
-  d.querySelector('.body').textContent=text;box.appendChild(d);box.scrollTop=box.scrollHeight;$('#t-count').textContent=++tc;}
+  d.querySelector('.body').textContent=text;box.appendChild(d);cap(box,60);box.scrollTop=box.scrollHeight;$('#t-count').textContent=++tc;}
 function addAction(name,summary,status){const box=$('#actions');const e=box.querySelector('.empty');if(e)e.remove();
   const d=document.createElement('div');d.className='act';d.dataset.name=name;
   d.innerHTML=`<div class="ic">${ICONS[name]||ICONS.default}</div><div class="meta"><div class="nm">${name}</div><div class="ds"></div></div><div class="st ${status||'run'}"></div>`;
-  d.querySelector('.ds').textContent=summary||'';box.appendChild(d);box.scrollTop=box.scrollHeight;$('#a-count').textContent=++ac;$('#s-tools').textContent=++tools;return d;}
+  d.querySelector('.ds').textContent=summary||'';box.appendChild(d);cap(box,80);box.scrollTop=box.scrollHeight;$('#a-count').textContent=++ac;$('#s-tools').textContent=++tools;return d;}
 function setBrain(p,model,key){const dot=$('#brain-dot');
   if(p==='gemini'){dot.classList.remove('off');$('#brain').innerHTML=`GEMINI · ${(model||'').replace('gemini-','').toUpperCase()} · KEY ${key||1}`;}
   else if(p==='ollama'){dot.classList.remove('off');$('#brain').textContent='OLLAMA · LOCAL';}

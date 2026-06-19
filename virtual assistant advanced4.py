@@ -300,12 +300,25 @@ class _HudHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
 
+class _HudServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # A browser tab closing or an SSE stream dropping raises ConnectionAborted/
+        # Reset/BrokenPipe — that's normal, not an error. Swallow it so the console
+        # isn't flooded with alarming tracebacks; re-raise anything genuinely unexpected.
+        import sys
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def _start_hud() -> str:
     """Launch the HUD server in a background thread. Returns its URL, or '' on failure."""
     try:
-        socketserver.ThreadingTCPServer.allow_reuse_address = True
-        srv = socketserver.ThreadingTCPServer(("127.0.0.1", _HUD_PORT), _HudHandler)
-        srv.daemon_threads = True
+        srv = _HudServer(("127.0.0.1", _HUD_PORT), _HudHandler)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         return f"http://127.0.0.1:{_HUD_PORT}"
     except Exception:
