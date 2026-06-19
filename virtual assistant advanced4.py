@@ -3296,13 +3296,23 @@ def _read_file_text(path: str, limit: int = 14000) -> str:
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
         from pypdf import PdfReader
-        txt = "\n".join((pg.extract_text() or "") for pg in PdfReader(path).pages)
+        parts = []
+        for pg in PdfReader(path).pages:           # stop once we have enough — don't read every page of a 2000-page PDF
+            parts.append(pg.extract_text() or "")
+            if sum(len(x) for x in parts) > limit:
+                break
+        txt = "\n".join(parts)
     elif ext == ".docx":
         import docx
-        txt = "\n".join(p.text for p in docx.Document(path).paragraphs)
+        parts = []
+        for p in docx.Document(path).paragraphs:
+            parts.append(p.text)
+            if sum(len(x) for x in parts) > limit:
+                break
+        txt = "\n".join(parts)
     else:                                   # txt / md / csv / code / etc.
         with open(path, encoding="utf-8", errors="ignore") as f:
-            txt = f.read()
+            txt = f.read(limit + 1)         # read only what we need — never load a multi-GB file into RAM
     return txt[:limit]
 
 
@@ -3347,13 +3357,21 @@ def _calc_eval(node):
             return node.value
         raise ValueError("only numbers allowed")
     if isinstance(node, _ast.BinOp) and type(node.op) in _CALC_BIN:
-        return _CALC_BIN[type(node.op)](_calc_eval(node.left), _calc_eval(node.right))
+        left, right = _calc_eval(node.left), _calc_eval(node.right)
+        if type(node.op) is _ast.Pow:           # block 2**99999999 → multi-GB int / OOM
+            if abs(right) > 4096 or (abs(left) > 1 and abs(left).bit_length() * abs(right) > 200000):
+                raise ValueError("exponent too large")
+        return _CALC_BIN[type(node.op)](left, right)
     if isinstance(node, _ast.UnaryOp) and type(node.op) in _CALC_UN:
         return _CALC_UN[type(node.op)](_calc_eval(node.operand))
     if isinstance(node, _ast.Name) and node.id in _CALC_NAMES:
         return _CALC_NAMES[node.id]
     if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name) and node.func.id in _CALC_FUNCS:
-        return _CALC_FUNCS[node.func.id](*[_calc_eval(a) for a in node.args])
+        fn = node.func.id
+        argv = [_calc_eval(a) for a in node.args]
+        if fn == "factorial" and (not argv or abs(argv[0]) > 10000):   # block factorial(999999)
+            raise ValueError("factorial argument too large")
+        return _CALC_FUNCS[fn](*argv)
     raise ValueError("unsupported expression")
 
 
@@ -3713,14 +3731,14 @@ def _watch_glance() -> str:
 
 def _watch_loop() -> None:
     while True:
-        if _WATCH["on"]:
-            tip = _watch_glance()
-            if tip:
-                _hud_emit("toast", text="💡 " + tip[:60], level="info")
-                try:
+        try:
+            if _WATCH["on"]:
+                tip = _watch_glance()
+                if tip:
+                    _hud_emit("toast", text="💡 " + tip[:60], level="info")
                     speak(tip)
-                except Exception:
-                    pass
+        except Exception:
+            pass        # one bad glance must never kill the watch thread
         time.sleep(max(30, int(_WATCH["interval"])) if _WATCH["on"] else 5)
 
 
@@ -4253,6 +4271,7 @@ def _presence_loop() -> None:
     last_posture = time.time()
     _PRESENCE["tick"] = time.time()
     while True:
+      try:
         if not _PRESENCE["on"]:
             _cam_release()
             time.sleep(2)
@@ -4342,6 +4361,8 @@ def _presence_loop() -> None:
                     except Exception:
                         pass
         time.sleep(3)
+      except Exception:
+        time.sleep(3)        # a bad frame / cv2 hiccup must never kill presence
 
 
 def _camera_recall(question: str) -> str:
@@ -4547,6 +4568,7 @@ def _telegram_loop() -> None:
           + ("" if JARVIS_TG_CHAT else "  (message it once to get your chat id)"))
     offset = 0
     while True:
+      try:
         # server long-poll 50s, HTTP client 70s → comfortable margin so a normal
         # long-poll doesn't time out the request and churn-reconnect.
         resp = _tg_call("getUpdates", offset=offset, timeout=50)
@@ -4554,7 +4576,9 @@ def _telegram_loop() -> None:
             time.sleep(3)
             continue
         for upd in resp.get("result", []):
-            offset = upd["update_id"] + 1
+            if not isinstance(upd, dict):
+                continue
+            offset = upd.get("update_id", offset - 1) + 1
             msg = upd.get("message") or upd.get("edited_message") or {}
             chat_id = str((msg.get("chat") or {}).get("id", ""))
             text = (msg.get("text") or "").strip()
@@ -4568,6 +4592,8 @@ def _telegram_loop() -> None:
             if chat_id != JARVIS_TG_CHAT:                # ignore everyone except you
                 continue
             threading.Thread(target=_tg_message, args=(text, voice, chat_id), daemon=True).start()
+      except Exception:
+        time.sleep(3)        # a bad update / hiccup must never kill the phone bridge
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4673,15 +4699,25 @@ def _search_files(query: str, path: str = "") -> str:
     root = _xp(path) or os.path.expanduser("~")
     q = query.lower()
     hits = []
+    deadline = time.time() + 8        # wall-clock budget so it can't crawl the whole drive for minutes
+    timed_out = False
     for dp, dns, fns in os.walk(root):
-        if sum(s in dp.lower() for s in ("\\appdata\\", "\\node_modules\\", "\\.git\\")):
+        if time.time() > deadline:
+            timed_out = True
+            break
+        low = dp.lower()
+        if any(s in low for s in ("\\appdata\\", "\\node_modules\\", "\\.git\\", "\\$recycle", "\\windows\\")):
+            dns[:] = []               # prune — don't descend into these
             continue
         for fn in fns:
             if q in fn.lower():
                 hits.append(os.path.join(dp, fn))
                 if len(hits) >= 40:
-                    return f"Found {len(hits)}+ (showing 40):\n" + "\n".join("  " + h for h in hits)
-    return (f"Found {len(hits)}:\n" + "\n".join("  " + h for h in hits)) if hits else f"No files matching '{query}' under {root}."
+                    return f"Found 40+ (showing 40):\n" + "\n".join("  " + h for h in hits)
+    if not hits:
+        return f"No files matching '{query}' under {root}" + (" (search timed out — narrow the folder)." if timed_out else ".")
+    note = "  (search timed out — there may be more)" if timed_out else ""
+    return f"Found {len(hits)}:\n" + "\n".join("  " + h for h in hits) + note
 
 
 def _open_folder(path: str) -> str:
@@ -4704,11 +4740,23 @@ def _create_folder(path: str) -> str:
         return f"Couldn't create folder: {e}"
 
 
+def _dest_clear(s: str, d: str) -> bool:
+    """True unless dst (or dst/basename when dst is a folder) already exists — so
+    move/copy never silently clobbers a file."""
+    final = os.path.join(d, os.path.basename(s.rstrip("\\/"))) if os.path.isdir(d) else d
+    return not os.path.exists(final)
+
+
 def _move_path(src: str, dst: str) -> str:
     import shutil
+    s, d = _xp(src), _xp(dst)
+    if not os.path.exists(s):
+        return f"Source doesn't exist: {s}"
+    if not _dest_clear(s, d):
+        return f"Refused — something already exists at the destination ({d}). Rename or remove it first."
     try:
-        shutil.move(_xp(src), _xp(dst))
-        return f"Moved to {_xp(dst)}."
+        shutil.move(s, d)
+        return f"Moved to {d}."
     except Exception as e:
         return f"Move failed: {e}"
 
@@ -4716,6 +4764,10 @@ def _move_path(src: str, dst: str) -> str:
 def _copy_path(src: str, dst: str) -> str:
     import shutil
     s, d = _xp(src), _xp(dst)
+    if not os.path.exists(s):
+        return f"Source doesn't exist: {s}"
+    if not _dest_clear(s, d):
+        return f"Refused — something already exists at the destination ({d}). Rename or remove it first."
     try:
         shutil.copytree(s, d) if os.path.isdir(s) else shutil.copy2(s, d)
         return f"Copied to {d}."
@@ -4743,8 +4795,12 @@ def _delete_path(path: str) -> str:
 
 def _rename_path(path: str, new_name: str) -> str:
     p = _xp(path)
+    if not os.path.exists(p):
+        return f"Path doesn't exist: {p}"
+    dest = os.path.join(os.path.dirname(p), os.path.basename(new_name))   # ignore any dirs in new_name
+    if os.path.exists(dest):
+        return f"Refused — '{os.path.basename(dest)}' already exists here."
     try:
-        dest = os.path.join(os.path.dirname(p), new_name)
         os.rename(p, dest)
         return f"Renamed to {dest}."
     except Exception as e:
@@ -4764,11 +4820,23 @@ def _zip_path(path: str) -> str:
 
 
 def _unzip_file(path: str, dest: str = "") -> str:
-    import shutil
     p = _xp(path)
     d = _xp(dest) or os.path.splitext(p)[0]
     try:
-        shutil.unpack_archive(p, d)
+        if p.lower().endswith(".zip"):
+            # Safe extraction — reject zip-slip entries that would escape `d`.
+            import zipfile
+            os.makedirs(d, exist_ok=True)
+            root = os.path.realpath(d)
+            with zipfile.ZipFile(p) as z:
+                for member in z.namelist():
+                    target = os.path.realpath(os.path.join(d, member))
+                    if not (target == root or target.startswith(root + os.sep)):
+                        return f"Refused to extract — '{member}' tries to escape the target folder."
+                z.extractall(d)
+        else:
+            import shutil
+            shutil.unpack_archive(p, d)
         return f"Extracted to {d}."
     except Exception as e:
         return f"Unzip failed: {e}"
@@ -5027,12 +5095,21 @@ def _sunrise_sunset(location: str) -> str:
 
 def _hacker_news(count: int = 5) -> str:
     try:
-        ids = requests.get("https://hacker-news.firebaseio.com/v0/topstories.json", timeout=10).json()[:max(1, min(10, count))]
-        out = []
-        for i in ids:
-            it = requests.get(f"https://hacker-news.firebaseio.com/v0/item/{i}.json", timeout=10).json()
-            out.append(f"  • {it.get('title','')} ({it.get('score',0)} pts)")
-        return "Hacker News top stories:\n" + "\n".join(out)
+        ids = requests.get("https://hacker-news.firebaseio.com/v0/topstories.json", timeout=8).json()[:max(1, min(10, count))]
+
+        def _story(i):
+            try:
+                it = requests.get(f"https://hacker-news.firebaseio.com/v0/item/{i}.json", timeout=6).json()
+                return (i, f"  • {it.get('title','')} ({it.get('score',0)} pts)")
+            except Exception:
+                return (i, None)
+
+        import concurrent.futures
+        # fetch the items concurrently instead of 1-by-1 (was up to ~110s of blocking)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+            results = dict(pool.map(_story, ids))
+        out = [results[i] for i in ids if results.get(i)]
+        return "Hacker News top stories:\n" + "\n".join(out) if out else "Couldn't fetch Hacker News right now."
     except Exception as e:
         return f"Hacker News error: {e}"
 
