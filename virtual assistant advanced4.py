@@ -908,15 +908,16 @@ def _as_index(value):
 
 
 def _settle(page, idle_ms: int = 4000, pause: float = 0.7) -> None:
-    """Wait for a page to stop changing after an action. Clicks that open a
-    modal/composer or load content need a beat before the DOM reflects the new
-    state — snapshotting too early is why an action's result looks 'unchanged'.
-    Generic: no per-site logic, just wait for network to go idle then pause for
-    any open/close animation to finish."""
+    """Wait for a page to stop changing after an action, then a short pause for
+    any modal/animation to render. We use 'domcontentloaded' (NOT 'networkidle'):
+    sites like LinkedIn/Gmail/YouTube hold long-poll/websocket connections so
+    'networkidle' never fires and burns the whole timeout every single action —
+    which made long multi-step tasks crawl. domcontentloaded returns instantly
+    once the DOM exists, so the real wait is just the small render pause."""
     try:
-        page.wait_for_load_state("networkidle", timeout=idle_ms)
+        page.wait_for_load_state("domcontentloaded", timeout=min(3000, idle_ms))
     except Exception:
-        pass  # not all actions trigger network — the pause below still helps
+        pass  # already loaded / context busy — the pause below still helps
     time.sleep(pause)
 
 
@@ -1972,12 +1973,7 @@ def _execute_tool_impl(name: str, args: dict) -> str:
         try:
             page = _get_page()
             page.goto(url, wait_until="domcontentloaded", timeout=25000)
-            # Give JS-heavy pages (LinkedIn, GitHub, etc.) time to render
-            try:
-                page.wait_for_load_state("networkidle", timeout=5000)
-            except Exception:
-                pass  # timeout is fine — page is usable, just still loading extras
-            time.sleep(0.5)
+            _settle(page, pause=1.0)   # short render pause (no networkidle stall)
             snap = execute_tool("browser_snapshot", {})
             return f"Navigated to: {page.title()} ({page.url})\n\n{snap}"
         except Exception as e:
@@ -1988,6 +1984,15 @@ def _execute_tool_impl(name: str, args: dict) -> str:
         try:
             page = _get_page()
             listing, items = _index_interactive(page)
+            if not items:
+                # A snapshot taken mid-navigation hits a detached context and looks
+                # empty — wait briefly and retry once before claiming "no elements".
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=3000)
+                except Exception:
+                    pass
+                time.sleep(0.6)
+                listing, items = _index_interactive(page)
             title   = page.title()
             url_now = page.url
             try:
@@ -1999,7 +2004,7 @@ def _execute_tool_impl(name: str, args: dict) -> str:
             if items:
                 result += listing
             else:
-                result += "No interactive elements detected (page may still be loading)."
+                result += "No interactive elements detected (page may still be loading — try browser_scroll or wait, then snapshot again)."
             result += f"\n\nPage text preview:\n{preview}"
             return result
         except Exception as e:
@@ -2029,14 +2034,19 @@ def _execute_tool_impl(name: str, args: dict) -> str:
                 snap = execute_tool("browser_snapshot", {})
                 return f"Clicked element [{idx}]. Page now:\n\n{snap}"
 
-            # Fallback: text-based matching (kept for resilience).
+            # Fallback: text-based matching (kept for resilience). NOTE: we use
+            # only PRECISE matchers (role/label/aria) — the old loose
+            # get_by_text(exact=False) routinely clicked the first incidental text
+            # match on a busy feed and reported it as success. Exact text only.
             strategies = [
-                lambda: page.get_by_role("button", name=text).first.click(timeout=3500),
-                lambda: page.get_by_role("link",   name=text).first.click(timeout=3500),
-                lambda: page.get_by_text(text, exact=False).first.click(timeout=3500),
-                lambda: page.get_by_label(text).first.click(timeout=3500),
-                lambda: page.get_by_placeholder(text).first.click(timeout=3500),
-                lambda: page.locator(f"[aria-label*='{text}']").first.click(timeout=3500),
+                lambda: page.get_by_role("button", name=text, exact=True).first.click(timeout=3500),
+                lambda: page.get_by_role("link",   name=text, exact=True).first.click(timeout=3500),
+                lambda: page.get_by_role("button", name=text).first.click(timeout=3000),
+                lambda: page.get_by_role("link",   name=text).first.click(timeout=3000),
+                lambda: page.get_by_label(text).first.click(timeout=3000),
+                lambda: page.get_by_placeholder(text).first.click(timeout=3000),
+                lambda: page.locator(f"[aria-label='{text}']").first.click(timeout=3000),
+                lambda: page.get_by_text(text, exact=True).first.click(timeout=3000),
             ]
             for strategy in strategies:
                 try:
@@ -3925,20 +3935,32 @@ def _mission(goal: str, max_rounds: int = 12) -> str:
     _hud_emit("toast", text="🚀 mission started", level="info")
     mission_tools = [t for t in TOOLS if t["function"]["name"] != "mission"]
     final = "Mission ended."
+    finished = False
+    empty_strikes = 0
     for _ in range(max_rounds):
         if _ABORT.is_set():
             return "Mission stopped."
         try:
             assistant, _label = brain_chat(messages, mission_tools, 0.2)
         except Exception as e:
-            return f"Mission error: {e}"
+            return f"Mission paused — {e}. Say 'continue' to resume."
         messages.append(assistant)
         content = (assistant.get("content") or "").strip()
         if content:
             final = content
         calls = assistant.get("tool_calls")
         if not calls:
-            break                                  # model is done talking
+            # Only treat a no-tool reply as "done" if it actually said something —
+            # a transient empty reply (after a 503/refusal) must NOT end the mission.
+            if content:
+                finished = True
+                break
+            empty_strikes += 1
+            if empty_strikes >= 3:
+                break
+            messages.append({"role": "user", "content": "Continue the mission — call the next tool."})
+            continue
+        empty_strikes = 0
         for tc in calls:
             nm = tc["function"]["name"]
             try:
@@ -3947,10 +3969,13 @@ def _mission(goal: str, max_rounds: int = 12) -> str:
                 a = {}
             res = execute_tool(nm, a)
             messages.append({"role": "tool", "tool_call_id": tc.get("id", "call_0"), "content": str(res)[:2500]})
+        _prune_old_snapshots(messages)
         if "MISSION COMPLETE" in content.upper():
+            finished = True
             break
-    _hud_emit("toast", text="🏁 mission finished", level="ok")
-    return final
+    _hud_emit("toast", text="🏁 mission finished" if finished else "⏸ mission incomplete",
+              level="ok" if finished else "warn")
+    return final if finished else f"Mission incomplete (ran out of steps): {final}"
 
 
 def brain_chat(messages, tools, temperature):
@@ -3960,6 +3985,25 @@ def brain_chat(messages, tools, temperature):
     msg = _gemini_request(messages, tools, temperature)
     _hud_emit("brain", provider="gemini", model=_gemini_last_model, key=_gemini_key_idx + 1)
     return _sanitize_assistant(msg), f"Gemini ({_gemini_last_model}, key {_gemini_key_idx + 1})"
+
+
+_MAX_ROUNDS = int(os.environ.get("JARVIS_MAX_ROUNDS", "18") or 18)
+_TOOL_RESULT_CAP = 6000   # per-tool-result chars kept in the running context
+
+
+def _prune_old_snapshots(messages) -> None:
+    """Keep only the MOST RECENT page snapshot's numbered element list in context.
+    Older snapshots have stale [N] numbers (re-assigned every snapshot) — leaving
+    them in the transcript makes the model click the wrong element on long tasks,
+    and bloats the context. Replace superseded ones with a short stub."""
+    snap_idxs = [i for i, m in enumerate(messages)
+                 if m.get("role") == "tool" and isinstance(m.get("content"), str)
+                 and ("BUTTONS/LINKS you can click" in m["content"]
+                      or "FIELDS you can type into" in m["content"])]
+    for i in snap_idxs[:-1]:          # all but the newest
+        if not messages[i]["content"].startswith("[older page snapshot"):
+            messages[i]["content"] = ("[older page snapshot omitted — its element "
+                                      "numbers are stale; use the LATEST snapshot below]")
 
 
 def process_command(user_input: str, history: list) -> tuple[str, list]:
@@ -3983,8 +4027,9 @@ def process_command(user_input: str, history: list) -> tuple[str, list]:
 
     final = "Done."
     label_shown = False
+    finished = False
     _hud_emit("state", state="thinking", sub="reasoning")
-    for _ in range(10):  # max 10 tool rounds per command
+    for _ in range(_MAX_ROUNDS):
         if _ABORT.is_set():
             history.append({"role": "assistant", "content": "Okay, stopped."})
             return "__ABORTED__", history
@@ -4013,6 +4058,7 @@ def process_command(user_input: str, history: list) -> tuple[str, list]:
 
         tool_calls = assistant.get("tool_calls")
         if not tool_calls:
+            finished = True          # the model is done acting and gave its reply
             break
 
         for tc in tool_calls:
@@ -4033,11 +4079,29 @@ def process_command(user_input: str, history: list) -> tuple[str, list]:
             if len(preview) > 900:
                 preview = preview[:900] + " …(truncated)"
             print(f"   ↳ {preview}")
+            content_str = str(result)
+            if len(content_str) > _TOOL_RESULT_CAP:    # don't let one huge result bloat context
+                content_str = content_str[:_TOOL_RESULT_CAP] + "\n…(truncated)"
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", "call_0"),
-                "content": str(result),
+                "content": content_str,
             })
+        _prune_old_snapshots(messages)   # keep only the latest page's element numbers
+
+    if not finished:
+        # Hit the action budget mid-task — get an HONEST status (no tools, so it
+        # can't keep acting) instead of returning a stale/over-optimistic line.
+        try:
+            messages.append({"role": "user", "content":
+                "You've reached your action limit for this task. In ONE short, honest "
+                "sentence tell me what you actually completed and what still remains — "
+                "do not claim anything you didn't verify."})
+            wrap, _ = brain_chat(messages, None, 0.2)
+            final = (wrap.get("content") or "").strip() or \
+                (final + "  (I hit my action limit; the task may be incomplete.)")
+        except Exception:
+            final = final + "  (I hit my action limit before finishing; say 'continue' to resume.)"
 
     history.append({"role": "assistant", "content": final})
     return final, history
