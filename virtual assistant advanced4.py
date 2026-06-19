@@ -486,11 +486,33 @@ def takeCommand() -> str:
 
     pa = _pa.PyAudio()
     _list_input_devices(pa)
-    mic_index = os.environ.get("JARVIS_MIC_INDEX")
     open_kw = {"rate": RATE, "channels": 1, "format": _pa.paInt16,
                "input": True, "frames_per_buffer": CHUNK}
-    if mic_index and mic_index.strip().isdigit():
-        open_kw["input_device_index"] = int(mic_index)
+    # Prefer selecting the mic by NAME (stable) — device INDEXES shift whenever
+    # you plug/unplug audio gear (e.g. a webcam adds mic entries and renumbers
+    # everything), which silently breaks a pinned JARVIS_MIC_INDEX.
+    mic_name = os.environ.get("JARVIS_MIC_NAME", "").strip().lower()
+    mic_index = os.environ.get("JARVIS_MIC_INDEX", "").strip()
+    chosen = None
+    if mic_name:
+        try:
+            for i in range(pa.get_device_count()):
+                d = pa.get_device_info_by_index(i)
+                if d.get("maxInputChannels", 0) > 0 and mic_name in d.get("name", "").lower():
+                    chosen = i
+                    break
+        except Exception:
+            pass
+        if chosen is None:
+            print(f"🎤 No input device matching name '{mic_name}' — using the system default.")
+    if chosen is None and mic_index.isdigit():
+        chosen = int(mic_index)
+    if chosen is not None:
+        open_kw["input_device_index"] = chosen
+        try:
+            print(f"🎤 Listening on device [{chosen}] {pa.get_device_info_by_index(chosen)['name']}")
+        except Exception:
+            pass
     try:
         stream = pa.open(**open_kw)
     except Exception as e:
