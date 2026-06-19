@@ -3021,7 +3021,10 @@ def _vision_click(page, description: str) -> str:
     )
     ans = _gemini_vision(prompt, base64.b64encode(buf.getvalue()).decode(), "image/png")
     mt = re.search(r"\{.*\}", ans, re.S)
-    data = json.loads(mt.group(0)) if mt else {}
+    try:
+        data = json.loads(mt.group(0)) if mt else {}
+    except Exception:
+        data = {}
     if not data.get("found") or "id" not in data:
         return f"I looked but couldn't visually identify '{description}'. Try browser_snapshot for the numbered list."
     idx = int(data["id"])
@@ -3044,6 +3047,7 @@ GEMINI_EMBED_MODEL = os.environ.get("JARVIS_EMBED_MODEL", "gemini-embedding-001"
 GEMINI_EMBED_DIM   = 768   # compact, fast cosine; the model supports custom dims
 _MEM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_memory.json")
 _MEM = []   # [{"text":str, "ts":str, "vec":[float]}]
+_MEM_LOCK = threading.Lock()   # voice loop AND Telegram thread both write memory
 
 
 def _gemini_embed(texts):
@@ -3091,9 +3095,15 @@ def _mem_load():
 
 
 def _mem_save():
+    # Atomic write under a lock — the voice loop and the Telegram thread can both
+    # call remember/forget; a non-atomic concurrent write could truncate the file
+    # and _mem_load would then silently reset memory to [] (wiping everything).
     try:
-        with open(_MEM_PATH, "w", encoding="utf-8") as f:
-            json.dump(_MEM, f)
+        with _MEM_LOCK:
+            tmp = _MEM_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(_MEM, f)
+            os.replace(tmp, _MEM_PATH)
     except Exception:
         pass
 
@@ -3105,7 +3115,9 @@ def _mem_add(fact: str) -> bool:
         return False
     vec = vecs[0]
     for m in _MEM:                               # de-dupe very similar facts
-        if m.get("vec") and _cosine(vec, m["vec"]) > 0.95:
+        # only compare same-dimension vectors (embedding dim/model may have changed
+        # between runs — zip() would otherwise silently compare a stale prefix)
+        if m.get("vec") and len(m["vec"]) == len(vec) and _cosine(vec, m["vec"]) > 0.95:
             m["text"], m["vec"] = fact, vec
             m["ts"] = datetime.datetime.now().isoformat(timespec="seconds")
             _mem_save()
@@ -3125,7 +3137,10 @@ def _mem_search(query: str, k: int = 4, threshold: float = 0.30):
     if not qv:
         return []
     qv = qv[0]
-    scored = [(m["text"], _cosine(qv, m["vec"])) for m in _MEM if m.get("vec")]
+    # Only score memories whose vector matches the current embedding dimension —
+    # a dim/model change would otherwise yield silently-wrong cosine scores.
+    scored = [(m["text"], _cosine(qv, m["vec"])) for m in _MEM
+              if m.get("vec") and len(m["vec"]) == len(qv)]
     scored.sort(key=lambda x: x[1], reverse=True)
     return [(t, s) for t, s in scored[:k] if s >= threshold]
 
@@ -3842,7 +3857,10 @@ def _desktop_pick(description: str, window_title: str = ""):
               f"\"{description}\"? Reply ONLY JSON: {{\"id\": <n>, \"found\": true}} or {{\"found\": false}}.")
     ans = _gemini_vision(prompt, base64.b64encode(buf.getvalue()).decode(), "image/jpeg")
     mt = re.search(r"\{.*\}", ans, re.S)
-    data = json.loads(mt.group(0)) if mt else {}
+    try:
+        data = json.loads(mt.group(0)) if mt else {}
+    except Exception:
+        data = {}
     if not data.get("found") or "id" not in data or not (0 <= int(data["id"]) < len(marks)):
         return {"found": False, "title": title, "n": len(marks)}
     x, y, lab = marks[int(data["id"])]
@@ -4188,6 +4206,11 @@ def _cam_open():
     global _cam
     import cv2
     if _cam is None or not _cam.isOpened():
+        if _cam is not None:
+            try:
+                _cam.release()       # release the stale handle before re-opening (no leak)
+            except Exception:
+                pass
         _cam = cv2.VideoCapture(JARVIS_CAM_INDEX)
         for _ in range(5):           # warm-up frames (first ones are often blank)
             _cam.read(); time.sleep(0.05)
@@ -4246,10 +4269,14 @@ def _face_present(frame) -> bool:
 
 def _cam_jpeg_b64(frame, max_w: int = 640, q: int = 75) -> str:
     import cv2
+    if frame is None:
+        return ""
     h, w = frame.shape[:2]
     if w > max_w:
         frame = cv2.resize(frame, (max_w, int(h * max_w / w)))
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, q])
+    if not ok or buf is None:           # encode can fail → don't crash on None
+        return ""
     return base64.b64encode(buf).decode()
 
 
@@ -5282,6 +5309,20 @@ def wish() -> None:
 #  MAIN LOOP
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if __name__ == "__main__":
+    # ── Make the process DPI-AWARE (must be first, before any screenshot/click) ──
+    # Without this, on a scaled display (e.g. 150%) the screen-grab, the UI-Automation
+    # rectangles, and pyautogui's click coordinates live in three DIFFERENT pixel
+    # spaces → desktop control and Set-of-Marks systematically mis-click. Per-Monitor-v2
+    # makes all three agree on physical pixels.
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)   # Win 8.1+ : per-monitor
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()        # fallback : system DPI aware
+    except Exception:
+        pass
+
     # ── Launch the live HUD (web control center) ──────────────────────────────
     _hud_url = _start_hud()
     if _hud_url:

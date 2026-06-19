@@ -283,14 +283,15 @@ function addAction(name,summary,status){const box=$('#actions');const e=box.quer
   const d=document.createElement('div');d.className='act';d.dataset.name=name;
   d.innerHTML=`<div class="ic">${ICONS[name]||ICONS.default}</div><div class="meta"><div class="nm">${name}</div><div class="ds"></div></div><div class="st ${status||'run'}"></div>`;
   d.querySelector('.ds').textContent=summary||'';box.appendChild(d);cap(box,80);box.scrollTop=box.scrollHeight;$('#a-count').textContent=++ac;$('#s-tools').textContent=++tools;return d;}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function setBrain(p,model,key){const dot=$('#brain-dot');
-  if(p==='gemini'){dot.classList.remove('off');$('#brain').innerHTML=`GEMINI · ${(model||'').replace('gemini-','').toUpperCase()} · KEY ${key||1}`;}
+  if(p==='gemini'){dot.classList.remove('off');$('#brain').textContent=`GEMINI · ${String(model||'').replace('gemini-','').toUpperCase()} · KEY ${key||1}`;}
   else if(p==='ollama'){dot.classList.remove('off');$('#brain').textContent='OLLAMA · LOCAL';}
   else $('#brain').textContent='BRAIN · STANDBY';}
 function setQuota(rows){const box=$('#quota');if(!rows||!rows.length)return;box.innerHTML='';
-  rows.forEach(r=>{const pct=Math.min(100,Math.round(r.used/r.limit*100));const cls=pct>=100?'full':pct>=70?'warn':'';
+  rows.forEach(r=>{const lim=Number(r.limit)||20;const pct=lim?Math.min(100,Math.max(0,Math.round((Number(r.used)||0)/lim*100))):0;const cls=pct>=100?'full':pct>=70?'warn':'';
     const d=document.createElement('div');d.className='qrow';
-    d.innerHTML=`<span class="ql">K${r.key}·${(r.model||'').replace('gemini-2.5-','')}</span><span class="qbar ${cls}"><i style="width:${pct}%"></i></span><span class="qn">${r.used}/${r.limit}</span>`;
+    d.innerHTML=`<span class="ql">K${esc(r.key)}·${esc(String(r.model||'').replace('gemini-2.5-',''))}</span><span class="qbar ${cls}"><i style="width:${pct}%"></i></span><span class="qn">${esc(r.used)}/${esc(lim)}</span>`;
     box.appendChild(d);});}
 function toast(text,lvl){const t=document.createElement('div');t.className='toast '+(lvl||'');t.textContent=text;
   $('#toasts').appendChild(t);setTimeout(()=>{t.style.opacity=0;setTimeout(()=>t.remove(),400)},3200);}
@@ -299,16 +300,16 @@ function setBar(id,pct){const e=document.getElementById(id);if(!e)return;e.style
   const bar=e.parentElement;bar.classList.toggle('warn',pct>=70&&pct<90);bar.classList.toggle('full',pct>=90);}
 let REMINDERS=[];
 function renderReminders(){const box=$('#reminders');const now=Date.now()/1000;
-  const live=REMINDERS.filter(r=>r.at>now);
+  const live=(REMINDERS||[]).filter(r=>r&&typeof r.at==='number'&&r.at>now);
   box.innerHTML=live.map(r=>{let s=Math.max(0,Math.round(r.at-now));const mm=String(Math.floor(s/60)).padStart(2,'0');
     const ss=String(s%60).padStart(2,'0');
-    return `<div class="rem"><span class="rt">⏰ ${mm}:${ss}</span><span class="rx">${r.text}</span></div>`;}).join('');}
+    return `<div class="rem"><span class="rt">⏰ ${mm}:${ss}</span><span class="rx">${esc(r.text)}</span></div>`;}).join('');}
 setInterval(renderReminders,1000);
 function setPlan(steps,done){const bar=$('#planbar');
   if(!steps||!steps.length){bar.classList.remove('show');bar.innerHTML='';return;}
   bar.classList.add('show');
   bar.innerHTML=steps.map((s,i)=>{const cls=i<done?'done':(i===done?'cur':'');
-    const mark=i<done?'✓':(i+1);return `<span class="pstep ${cls}"><span class="b">${mark}</span>${s}</span>`;}).join('');}
+    const mark=i<done?'✓':(i+1);return `<span class="pstep ${cls}"><span class="b">${mark}</span>${esc(s)}</span>`;}).join('');}
 function setVitals(v){
   if(typeof v.cpu==='number'){setBar('v-cpu',v.cpu);$('#v-cpu-n').textContent=v.cpu+'%';}
   if(typeof v.ram==='number'){setBar('v-ram',v.ram);$('#v-ram-n').textContent=v.ram+'%';}
@@ -336,7 +337,7 @@ function dispatch(m){switch(m.kind){
   case'plan':setPlan(m.steps,m.done||0);break;
   case'reminders':REMINDERS=m.items||[];renderReminders();break;
   case'memory_list':{if(typeof m.count==='number')$('#s-mem').textContent=m.count;
-    const l=$('#md-list');l.innerHTML=(m.items&&m.items.length)?m.items.map(t=>`<div class="mfact">${t}</div>`).join(''):'<div class="empty">Nothing learned yet.</div>';break;}
+    const l=$('#md-list');l.innerHTML=(m.items&&m.items.length)?m.items.map(t=>`<div class="mfact">${esc(t)}</div>`).join(''):'<div class="empty">Nothing learned yet.</div>';break;}
   case'watch':$('#watchdot').classList.toggle('on',!!m.on);break;
   case'cam':{if(m.img){$('#camimg').src=m.img;$('#campanel').classList.add('show');}break;}
   case'presence':{const b=$('#cambadge');if(b){b.textContent=m.present?'● PRESENT':'○ AWAY';b.classList.toggle('away',!m.present);}
@@ -373,6 +374,7 @@ function rgba(a,al){return`rgba(${a[0]},${a[1]},${a[2]},${al})`;}
 function rotMul(){return({standby:.35,listening:.6,thinking:1.7,acting:1.05,speaking:1.15})[STATE]||.4;}
 
 function frame(now){
+  if(!ctx){return requestAnimationFrame(frame);}   // lost GPU context → keep trying, don't freeze the reactor
   const dt=Math.min(0.05,(now-lastT)/1000);lastT=now;
   // idle level when no real audio events arrive
   if(now-lastLevelAt>380){
@@ -457,12 +459,23 @@ function boot(done){
 }
 $('#boot').addEventListener('click',()=>$('#boot').classList.add('gone'));
 
-/* ── live event stream ───────────────────────────────────────────── */
-function connect(){try{const es=new EventSource('/events');
-  es.onopen=()=>{$('#conn-dot').classList.remove('off');$('#conn').textContent='ONLINE';};
-  es.onmessage=ev=>{try{dispatch(JSON.parse(ev.data))}catch(e){}};
-  es.onerror=()=>{$('#conn-dot').classList.add('off');$('#conn').textContent='RECONNECTING';};
-}catch(e){$('#conn').textContent='OFFLINE';}}
+/* ── live event stream (auto-reconnects if Jarvis restarts) ────────── */
+let _reconnectT=null;
+function connect(){
+  try{
+    const es=new EventSource('/events');
+    es.onopen=()=>{$('#conn-dot').classList.remove('off');$('#conn').textContent='ONLINE';};
+    es.onmessage=ev=>{try{dispatch(JSON.parse(ev.data))}catch(e){}};
+    es.onerror=()=>{
+      $('#conn-dot').classList.add('off');$('#conn').textContent='RECONNECTING';
+      // If the browser gave up (backend fully restarted), close and retry ourselves
+      // so the HUD recovers automatically instead of sitting on RECONNECTING forever.
+      if(es.readyState===2){ try{es.close()}catch(e){}
+        if(!_reconnectT)_reconnectT=setTimeout(()=>{_reconnectT=null;connect();},2000); }
+    };
+  }catch(e){$('#conn').textContent='OFFLINE';
+    if(!_reconnectT)_reconnectT=setTimeout(()=>{_reconnectT=null;connect();},2000);}
+}
 
 resize();setState('standby','ready');requestAnimationFrame(frame);
 boot(()=>connect());
@@ -477,8 +490,9 @@ const cmd=$('#cmd');
 if(cmd)cmd.addEventListener('keydown',e=>{
   if(e.key==='Enter'&&cmd.value.trim()){
     const text=cmd.value.trim();cmd.value='';
-    fetch('/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})}).catch(()=>{});
-    toast('⌨ sent: '+text.slice(0,40),'info');
+    fetch('/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})})
+      .then(r=>{if(r.ok)toast('⌨ sent: '+text.slice(0,40),'info');else toast('couldn’t reach Jarvis','warn');})
+      .catch(()=>toast('couldn’t reach Jarvis','warn'));
   }});
 
 /* simulated vitals when no backend is connected (keeps the panel alive offline) */
