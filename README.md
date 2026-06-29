@@ -132,7 +132,8 @@ acts on them — opening apps, searching the web, and driving websites end-to-en
 pip install SpeechRecognition pyaudio edge-tts pygame wikipedia \
             deep-translator pyshorteners requests ddgs \
             playwright pywinauto keyboard \
-            psutil pyperclip pypdf python-docx Pillow pyautogui opencv-python
+            psutil pyperclip pypdf python-docx Pillow pyautogui opencv-python \
+            tzdata
 python -m playwright install chromium
 ```
 

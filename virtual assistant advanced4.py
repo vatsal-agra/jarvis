@@ -920,6 +920,17 @@ def _as_index(value):
     return None
 
 
+def _safe_int(value, default: int) -> int:
+    """Coerce a tool arg to int without ever raising — the model sometimes sends
+    a string like 'ten' or '5 stories' for a numeric field. Pull the first
+    integer out if present, else fall back to *default*."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        m = re.search(r"-?\d+", str(value))
+        return int(m.group()) if m else default
+
+
 def _settle(page, idle_ms: int = 4000, pause: float = 0.7) -> None:
     """Wait for a page to stop changing after an action, then a short pause for
     any modal/animation to render. We use 'domcontentloaded' (NOT 'networkidle'):
@@ -1950,10 +1961,12 @@ def _execute_tool_impl(name: str, args: dict) -> str:
                 proc = subprocess.run(
                     ["powershell", "-Command", cmd],
                     capture_output=True, text=True, timeout=15,
+                    encoding="utf-8", errors="replace",
                 )
             else:
                 proc = subprocess.run(
                     cmd, shell=True, capture_output=True, text=True, timeout=15,
+                    encoding="utf-8", errors="replace",
                 )
             out = (proc.stdout or proc.stderr or "Done.").strip()
             return out[:500]
@@ -1965,7 +1978,7 @@ def _execute_tool_impl(name: str, args: dict) -> str:
     # ── web_search ────────────────────────────────────────────────────────────
     elif name == "web_search":
         query = args.get("query", "")
-        max_r = int(args.get("max_results", 5))
+        max_r = _safe_int(args.get("max_results", 5), 5)
         try:
             from ddgs import DDGS
             results = []
@@ -2215,8 +2228,10 @@ def _execute_tool_impl(name: str, args: dict) -> str:
         topic = args.get("topic", "")
         try:
             import wikipedia
-            summary = wikipedia.summary(topic, sentences=3)
-            return summary
+        except ImportError:
+            return "Wikipedia lookup needs the 'wikipedia' package (pip install wikipedia)."
+        try:
+            return wikipedia.summary(topic, sentences=3)
         except wikipedia.exceptions.DisambiguationError as e:
             return f"Multiple results for '{topic}'. Did you mean: {', '.join(e.options[:3])}?"
         except wikipedia.exceptions.PageError:
@@ -2401,7 +2416,7 @@ def _execute_tool_impl(name: str, args: dict) -> str:
             if action == "list":
                 return "Open tabs:\n" + "\n".join(
                     f"  [{i}] {p.title()[:50]}  ({p.url[:60]})" for i, p in enumerate(pages))
-            idx = int(args.get("index", 0))
+            idx = _safe_int(args.get("index", 0), 0)
             if not (0 <= idx < len(pages)):
                 return f"No tab [{idx}]. There are {len(pages)} tabs."
             if action == "switch":
@@ -2558,7 +2573,7 @@ def _execute_tool_impl(name: str, args: dict) -> str:
     elif name == "disk_usage":      return _disk_usage(args.get("path", ""))
     elif name == "file_info":       return _file_info(args.get("path", ""))
     elif name == "system_info":     return _system_info()
-    elif name == "list_processes":  return _list_processes(int(args.get("top", 10) or 10))
+    elif name == "list_processes":  return _list_processes(_safe_int(args.get("top", 10), 10))
     elif name == "kill_process":    return _kill_process(args.get("name", ""))
     elif name == "battery_status":  return _battery_status()
     elif name == "screenshot_save": return _screenshot_save(args.get("path", ""))
@@ -2567,17 +2582,17 @@ def _execute_tool_impl(name: str, args: dict) -> str:
     elif name == "summarize_text":  return _ai_text("Summarise this concisely:", args.get("text", ""))
     elif name == "rewrite_text":    return _ai_text(f"Rewrite this in a {args.get('style','clear, polished')} style:", args.get("text", ""))
     elif name == "fix_grammar":     return _ai_text("Fix the spelling and grammar; return only the corrected text:", args.get("text", ""))
-    elif name == "generate_password": return _generate_password(int(args.get("length", 16) or 16), bool(args.get("symbols", True)))
+    elif name == "generate_password": return _generate_password(_safe_int(args.get("length", 16), 16), bool(args.get("symbols", True)))
     elif name == "hash_text":       return _hash_text(args.get("text", ""), args.get("algo", "sha256"))
     elif name == "base64_tool":     return _base64_tool(args.get("text", ""), args.get("mode", "encode"))
     elif name == "format_json":     return _format_json(args.get("text", ""))
     elif name == "count_words":     return _count_words(args.get("text", ""))
     elif name == "qr_generate":     return _qr_generate(args.get("data", ""), args.get("path", ""))
     elif name == "describe_image":  return _describe_image(args.get("path", ""), args.get("question", "Describe this image."))
-    elif name == "get_forecast":    return _get_forecast(args.get("location", ""), int(args.get("days", 3) or 3))
+    elif name == "get_forecast":    return _get_forecast(args.get("location", ""), _safe_int(args.get("days", 3), 3))
     elif name == "air_quality":     return _air_quality(args.get("location", ""))
     elif name == "sunrise_sunset":  return _sunrise_sunset(args.get("location", ""))
-    elif name == "hacker_news":     return _hacker_news(int(args.get("count", 5) or 5))
+    elif name == "hacker_news":     return _hacker_news(_safe_int(args.get("count", 5), 5))
     elif name == "github_repo":     return _github_repo(args.get("repo", ""))
     elif name == "synonyms":        return _synonyms(args.get("word", ""))
     elif name == "random_fact":     return _random_fact()
@@ -2585,9 +2600,9 @@ def _execute_tool_impl(name: str, args: dict) -> str:
     elif name == "this_day":        return _this_day()
     elif name == "stock_price":     return _stock_price(args.get("symbol", ""))
     elif name == "time_in":         return _time_in(args.get("city", ""))
-    elif name == "roll_dice":       return _roll_dice(int(args.get("sides", 6) or 6), int(args.get("count", 1) or 1))
+    elif name == "roll_dice":       return _roll_dice(_safe_int(args.get("sides", 6), 6), _safe_int(args.get("count", 1), 1))
     elif name == "flip_coin":       return _flip_coin()
-    elif name == "random_number":   return _random_number(int(args.get("lo", 1) or 1), int(args.get("hi", 100) or 100))
+    elif name == "random_number":   return _random_number(_safe_int(args.get("lo", 1), 1), _safe_int(args.get("hi", 100), 100))
     elif name == "days_until":      return _days_until(args.get("date", ""))
     elif name == "expand_url":      return _expand_url(args.get("url", ""))
 
@@ -3047,7 +3062,8 @@ GEMINI_EMBED_MODEL = os.environ.get("JARVIS_EMBED_MODEL", "gemini-embedding-001"
 GEMINI_EMBED_DIM   = 768   # compact, fast cosine; the model supports custom dims
 _MEM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_memory.json")
 _MEM = []   # [{"text":str, "ts":str, "vec":[float]}]
-_MEM_LOCK = threading.Lock()   # voice loop AND Telegram thread both write memory
+_MEM_LOCK = threading.RLock()  # voice loop AND Telegram thread both write memory
+                               # (reentrant: _mem_add/_forget hold it AND call _mem_save)
 
 
 def _gemini_embed(texts):
@@ -3114,17 +3130,21 @@ def _mem_add(fact: str) -> bool:
     if not vecs:
         return False
     vec = vecs[0]
-    for m in _MEM:                               # de-dupe very similar facts
-        # only compare same-dimension vectors (embedding dim/model may have changed
-        # between runs — zip() would otherwise silently compare a stale prefix)
-        if m.get("vec") and len(m["vec"]) == len(vec) and _cosine(vec, m["vec"]) > 0.95:
-            m["text"], m["vec"] = fact, vec
-            m["ts"] = datetime.datetime.now().isoformat(timespec="seconds")
-            _mem_save()
-            _emit_memory_list()
-            return True
-    _MEM.append({"text": fact, "ts": datetime.datetime.now().isoformat(timespec="seconds"), "vec": vec})
-    _mem_save()
+    # Hold the lock across the scan+mutate so a concurrent remember/forget on the
+    # Telegram thread can't change _MEM mid-iteration ("list changed size") or lose
+    # a write. The embed above is left outside the lock (it's slow network I/O).
+    with _MEM_LOCK:
+        for m in _MEM:                               # de-dupe very similar facts
+            # only compare same-dimension vectors (embedding dim/model may have changed
+            # between runs — zip() would otherwise silently compare a stale prefix)
+            if m.get("vec") and len(m["vec"]) == len(vec) and _cosine(vec, m["vec"]) > 0.95:
+                m["text"], m["vec"] = fact, vec
+                m["ts"] = datetime.datetime.now().isoformat(timespec="seconds")
+                _mem_save()
+                _emit_memory_list()
+                return True
+        _MEM.append({"text": fact, "ts": datetime.datetime.now().isoformat(timespec="seconds"), "vec": vec})
+        _mem_save()
     _emit_memory_list()
     return True
 
@@ -3237,7 +3257,11 @@ def _rem_load():
     global _REMINDERS
     try:
         with open(_REM_PATH, encoding="utf-8") as f:
-            _REMINDERS = json.load(f)
+            data = json.load(f)
+        # Keep only well-formed entries so a corrupt/edited file can't crash the
+        # reminder thread on r["at"]/r["text"].
+        _REMINDERS = [r for r in data if isinstance(r, dict)
+                      and isinstance(r.get("at"), (int, float)) and "text" in r]
     except Exception:
         _REMINDERS = []
 
@@ -3769,10 +3793,13 @@ def _forget(query: str) -> str:
     if not hits:
         return "I couldn't find a matching memory to forget."
     target = hits[0][0]
-    before = len(_MEM)
-    _MEM[:] = [m for m in _MEM if m["text"] != target]
-    if len(_MEM) < before:
-        _mem_save()
+    with _MEM_LOCK:                 # atomic rebuild vs a concurrent remember/forget
+        before = len(_MEM)
+        _MEM[:] = [m for m in _MEM if m["text"] != target]
+        removed = len(_MEM) < before
+        if removed:
+            _mem_save()
+    if removed:
         _emit_memory_list()
         _hud_emit("memory", count=len(_MEM))
         return f"Forgotten: {target}"
@@ -4633,11 +4660,29 @@ _SCHEDULE = []
 _SCHED_LOCK = threading.Lock()
 
 
+def _norm_hhmm(s: str) -> str:
+    """Normalise a human time ('8', '8:00', '8am', '6:30 PM', '18:00') to 24h
+    'HH:MM' so the scheduler's strftime('%H:%M') comparison can match it.
+    Returns '' if it can't be parsed."""
+    s = (s or "").strip().lower().replace(".", "")
+    for fmt in ("%H:%M", "%I:%M%p", "%I:%M %p", "%I%p", "%I %p", "%H"):
+        try:
+            return datetime.datetime.strptime(s, fmt).strftime("%H:%M")
+        except ValueError:
+            continue
+    return ""
+
+
 def _sched_load():
     global _SCHEDULE
     try:
         with open(_SCHED_PATH, encoding="utf-8") as f:
-            _SCHEDULE = json.load(f)
+            data = json.load(f)
+        # Drop anything malformed so a corrupt/old-format file can't crash the
+        # scheduler thread on a hard subscript later.
+        _SCHEDULE = [it for it in data if isinstance(it, dict) and "command" in it
+                     and (isinstance(it.get("at"), (int, float))
+                          or isinstance(it.get("time"), str))]
     except Exception:
         _SCHEDULE = []
 
@@ -4653,8 +4698,12 @@ def _sched_save():
 def _schedule_task(command: str, delay_seconds: int = 0, at_time: str = "", daily: bool = False) -> str:
     item = {"command": command}
     if at_time:
-        item.update({"time": at_time.strip(), "daily": bool(daily), "last": ""})
-        when = f"every day at {at_time}" if daily else f"at {at_time}"
+        norm = _norm_hhmm(at_time)
+        if not norm:
+            return (f"I couldn't understand the time '{at_time}'. "
+                    f"Try something like 08:00, 6:30pm, or 18:00.")
+        item.update({"time": norm, "daily": bool(daily), "last": ""})
+        when = f"every day at {norm}" if daily else f"at {norm}"
     else:
         item["at"] = time.time() + max(5, int(delay_seconds or 0))
         when = f"in about {max(1, round((delay_seconds or 0) / 60))} minute(s)"
@@ -4678,7 +4727,9 @@ def _schedule_loop():
                     (due if it["at"] <= now else keep).append(it)
                 elif it.get("time") == hhmm and it.get("last") != today:
                     it["last"] = today
-                    due.append(it); keep.append(it)        # daily → stays
+                    due.append(it)
+                    if it.get("daily"):
+                        keep.append(it)        # daily → stays; one-shot → fire once then drop
                 else:
                     keep.append(it)
             if len(keep) != len(_SCHEDULE) or due:
@@ -4813,7 +4864,12 @@ def _delete_path(path: str) -> str:
     try:
         dest = os.path.join(trash, os.path.basename(p.rstrip("\\/")))
         if os.path.exists(dest):
-            dest += f"_{int(_PRESENCE.get('tick', 0))}"
+            # guarantee a unique name so trashing two same-named files never
+            # clobbers the earlier one (the "always reversible" promise).
+            stem, n = dest, 1
+            while os.path.exists(dest):
+                dest = f"{stem}_{n}"
+                n += 1
         shutil.move(p, dest)
         return f"Moved to trash ({trash}). Recover it there if needed."
     except Exception as e:
@@ -4837,8 +4893,12 @@ def _rename_path(path: str, new_name: str) -> str:
 def _zip_path(path: str) -> str:
     import shutil
     p = _xp(path)
+    if not os.path.exists(p):
+        return f"Path doesn't exist: {p}"
     try:
         base = p.rstrip("\\/")
+        if os.path.exists(base + ".zip"):
+            return f"Refused — {base}.zip already exists. Remove or rename it first."
         out = shutil.make_archive(base, "zip", p if os.path.isdir(p) else os.path.dirname(p),
                                   None if os.path.isdir(p) else os.path.basename(p))
         return f"Zipped to {out}."
@@ -4861,9 +4921,21 @@ def _unzip_file(path: str, dest: str = "") -> str:
                     if not (target == root or target.startswith(root + os.sep)):
                         return f"Refused to extract — '{member}' tries to escape the target folder."
                 z.extractall(d)
+        elif p.lower().endswith((".tar", ".tar.gz", ".tgz", ".tar.bz2",
+                                 ".tbz2", ".tar.xz", ".txz")):
+            # Same path-traversal guard for tar archives (the old unpack_archive
+            # fallback extracted these with no zip-slip protection).
+            import tarfile
+            os.makedirs(d, exist_ok=True)
+            root = os.path.realpath(d)
+            with tarfile.open(p) as t:
+                for member in t.getmembers():
+                    target = os.path.realpath(os.path.join(d, member.name))
+                    if not (target == root or target.startswith(root + os.sep)):
+                        return f"Refused to extract — '{member.name}' tries to escape the target folder."
+                t.extractall(d)
         else:
-            import shutil
-            shutil.unpack_archive(p, d)
+            return "Only .zip and .tar(.gz/.bz2/.xz) archives are supported for safe extraction."
         return f"Extracted to {d}."
     except Exception as e:
         return f"Unzip failed: {e}"
@@ -4884,14 +4956,17 @@ def _file_info(path: str) -> str:
     p = _xp(path)
     if not os.path.exists(p):
         return f"Path doesn't exist: {p}"
-    st = os.stat(p)
-    when = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
-    size = st.st_size
-    unit = "bytes"
-    for u in ("KB", "MB", "GB"):
-        if size >= 1024:
-            size /= 1024; unit = u
-    return f"{p}\n  {'folder' if os.path.isdir(p) else 'file'}, {round(size,1)} {unit}, modified {when}"
+    try:
+        st = os.stat(p)
+        when = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+        size = st.st_size
+        unit = "bytes"
+        for u in ("KB", "MB", "GB"):
+            if size >= 1024:
+                size /= 1024; unit = u
+        return f"{p}\n  {'folder' if os.path.isdir(p) else 'file'}, {round(size,1)} {unit}, modified {when}"
+    except Exception as e:
+        return f"Couldn't read info for {p}: {e}"
 
 
 # ── system ───────────────────────────────────────────────────────────────────
@@ -5112,10 +5187,26 @@ def _sunrise_sunset(location: str) -> str:
         return f"Couldn't find '{location}'."
     try:
         s = requests.get("https://api.sunrise-sunset.org/json", params={
-            "lat": r["latitude"], "lng": r["longitude"], "formatted": 0,
-            "tzid": r.get("timezone", "UTC")}, timeout=10).json()["results"]
-        sr = s["sunrise"][11:16]; ss = s["sunset"][11:16]
-        return f"{r['name']}: sunrise {sr}, sunset {ss} (local time)."
+            "lat": r["latitude"], "lng": r["longitude"], "formatted": 0},
+            timeout=10).json()["results"]
+        # formatted=0 returns UTC ISO timestamps — convert to the place's own
+        # timezone so the label "(local time)" is actually true.
+        tzname = r.get("timezone")
+        tz = None
+        if tzname:
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(tzname)
+            except Exception:
+                tz = None
+        def _fmt(iso):
+            dt = datetime.datetime.fromisoformat(iso)
+            if tz is not None:
+                dt = dt.astimezone(tz)
+            return dt.strftime("%I:%M %p")
+        sr = _fmt(s["sunrise"]); ss = _fmt(s["sunset"])
+        label = "local time" if tz is not None else "UTC"
+        return f"{r['name']}: sunrise {sr}, sunset {ss} ({label})."
     except Exception as e:
         return f"Sunrise/sunset error: {e}"
 
@@ -5266,9 +5357,13 @@ def _expand_url(url: str) -> str:
         url = "https://" + url
     try:
         r = requests.head(url, allow_redirects=True, timeout=10)
-        if r.url == url:
-            r = requests.get(url, allow_redirects=True, timeout=10, stream=True)
-        return f"{url}\n  → {r.url}"
+        final = r.url
+        if final == url:
+            # Some hosts don't redirect on HEAD — fall back to GET, but close the
+            # connection instead of leaking it (stream=True is never read).
+            with requests.get(url, allow_redirects=True, timeout=10, stream=True) as g:
+                final = g.url
+        return f"{url}\n  → {final}"
     except Exception as e:
         return f"Couldn't expand that URL: {e}"
 
